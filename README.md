@@ -1,451 +1,290 @@
-# ExtendedReplay
+<div align="center">
 
-**ExtendedReplay** is a server-side 3D replay, live mirror, playback, event timeline and analysis system for Minecraft Paper servers. It records the full state of bounded arena sessions and allows them to be replayed on a separate replay server with full moderator inspection and analysis capabilities.
+# 🎬 ExtendedReplay
 
-**Unlike video recording or client-side ReplayMod clones, ExtendedReplay is a distributed server-side world-state recorder and playback system** — it reconstructs a true 3D world from precomputed arena snapshots and event-based deltas, enabling moderators to freely fly around, inspect inventories at any timestamp, render player routes, and analyze match events.
+**Server-side 3D replay, live mirror & match analysis for Minecraft Paper servers.**
 
-## Core Vision
+*Not a video recorder. Not a ReplayMod clone. A distributed world-state recorder —
+your matches, replayable as a real, walkable 3D world.*
+
+[![Java](https://img.shields.io/badge/Java-21+-orange?logo=openjdk&logoColor=white)](https://adoptium.net/)
+[![Paper](https://img.shields.io/badge/Paper-1.21.10-blue)](https://papermc.io/)
+[![Build](https://img.shields.io/badge/build-Gradle%209-02303A?logo=gradle)](https://gradle.org/)
+[![Status](https://img.shields.io/badge/status-in%20development-yellow)](#-project-status)
+
+</div>
+
+---
+
+## 💡 What is this?
+
+ExtendedReplay records everything that happens inside a bounded Minecraft arena —
+player movement at **20 Hz**, every block change, every chest, every kill — and streams
+it live to a **separate replay server**. There, moderators join a reconstructed 3D copy
+of the match: fly around freely, pause and rewind time, jump to any kill, open any chest
+*as it was at that moment*, and render player routes for analysis.
 
 ```
-hungergames.nak-lan.de (PRODUCER)
-├─ Runs real game with TheHungerGames
-├─ ExtendedReplay records 20 Hz player frames + events
-└─ Streams deltas to replay server
-
-replay.nak-lan.de (REPLAY)
-├─ Receives live replay data
-├─ Reconstructs arena from snapshot + events
-├─ Renders players as Mannequins/NPCs
-├─ Moderators freecam, inspect, analyze
-└─ Route rendering, heatmaps, scene creation
+   GAME SERVER  (PRODUCER)                      REPLAY SERVER  (REPLAY)
+ ┌──────────────────────────┐                ┌──────────────────────────────┐
+ │  TheHungerGames (or any  │   WebSocket    │  Live mirror of the match    │
+ │  other minigame plugin)  │   ══════════▶  │  Playback: ⏪ ⏸ ▶ ⏩ 0.25–8× │
+ │                          │   compact      │  Event timeline & browser    │
+ │  ExtendedReplay records: │   binary       │  Inventory time machine      │
+ │  • 20 Hz player frames   │   protocol,    │  Route rendering & analysis  │
+ │  • block/chest deltas    │   batched,     │  Moderator hotbar GUI        │
+ │  • kills, events, chat   │   zstd, spool  │                              │
+ └──────────────────────────┘                └──────────────────────────────┘
+      never blocks gameplay                     moderators fly & inspect
 ```
 
-ExtendedReplay is **independent from TheHungerGames** and works with any server/minigame, but TheHungerGames may optionally integrate via a public API.
+**The game server never suffers.** Capture copies only primitives on the main thread;
+serialization, compression, disk and network I/O all happen on background workers. If
+the replay server goes down, packets spool to disk and are delivered after reconnect —
+and if everything fails, the game just keeps running.
 
-## Key Features
+---
 
-### Recording (PRODUCER Mode)
-- **20 Hz player frames** with position, rotation, pose, equipment, health
-- **Event sourcing** — block changes, kills, deaths, inventory/container snapshots
-- **Compact binary protocol** — no JSON in high-frequency data
-- **Zero gameplay impact** — non-blocking queues, async storage, adaptive degradation
-- **Arena bounds** — optional recording within cuboid/radius constraints
-- **Inventory/container tracking** — dirty-state snapshots only on change
-- **Custom events** — extensible plugin event support (e.g., supply drops, sponsor rewards)
+## ✨ Feature Highlights
 
-### Playback & Live Mirror (REPLAY Mode)
-- **Live mirror** — watch the current session with configurable 2-second delay
-- **Playback controls** — play/pause/resume, jump to timestamp/event, rewind/forward
-- **Playback speed** — 0.25x to 8x
-- **Player rendering** — native Mannequin entities with fallback renderers (NPC, DisplayEntity)
-- **Freecam/spectator** — moderators fly around and explore the arena
-- **Hotbar GUI** — in-game moderator controls (play/pause, timeline, events, routes, speed)
-- **Inventory/container inspection** — examine what was in a chest or player inventory at any timestamp
+| | |
+|---|---|
+| 🎥 **True 3D replay** | The arena is rebuilt from a pre-match snapshot + event-sourced deltas — walk through the replay like a spectator |
+| 📡 **Live mirror** | Watch the running match on the replay server with a configurable delay |
+| ⏱️ **20 Hz player frames** | Position, view direction, pose, sneaking/sprinting/gliding, health, held slot — every tick |
+| 🎒 **Inventory time machine** | Inspect any player inventory or chest *at any timestamp* — dirty-state snapshots with content hashing |
+| 📅 **Event timeline** | Kills, deaths, chest opens, supply drops, custom plugin events — browse, filter, jump |
+| 🗺️ **Route rendering** | Async analysis jobs draw player paths as carpet/glass/particles in a dedicated analysis world |
+| 🧍 **Mannequin rendering** | Players are rendered as native Paper Mannequin entities (with renderer abstraction for fallbacks) |
+| 🔌 **Public API** | Any plugin can start sessions, record custom events and bookmarks via `ExtendedReplayApi` |
+| 🛡️ **Integrity built-in** | Checksummed zstd segments, session manifest, `/erp verify`, degradation markers |
 
-### Event Timeline & Analysis
-- **Event browser** — categorized session events (kills, loot, supply drops, custom events, admin actions)
-- **Smart bookmarking** — auto-bookmark first blood, final kill, deaths, suspicious events
-- **Scene creation** — save replay segments with custom camera positions and notes
-- **Route rendering** — async analysis jobs to visualize player paths (carpet, glass, concrete, particles)
-- **Heatmaps** — movement, kills, deaths, loot interactions
-- **Route modes** — full session, time window, before/after event, combat-only, last-60-seconds-before-death
+---
 
-### Snapshot Management
-- Precomputed arena snapshots at match start
-- Commands to create, verify, and manage snapshots
-- Snapshots referenced by replay sessions (not re-serialized)
-- Keyframes generated on replay server for efficient playback
+## 🏗️ Architecture
 
-### Storage & Integrity
-- **Segment files** — 30-second compressed segments, checksummed, append-only during recording
-- **Metadata database** — SQLite with sessions, players, events, bookmarks, indexes
-- **Replay verification** — integrity checks, degraded range detection, repair commands
-- **Retention policies** — max days, max GB, favorite persistence
+### Server roles
 
-## Architecture
+One plugin, four roles — set `extendedreplay.server-role` in `config.yml`:
+
+| Role | Purpose |
+|------|---------|
+| `PRODUCER` | Real game server. Captures & streams. Featherweight — never plays back, never renders. |
+| `REPLAY` | Replay server. Receives, stores, mirrors, plays back, analyses. |
+| `STANDALONE` | Records **and** plays back on one server. For local testing. |
+| `DISABLED` | Plugin loads, does nothing. |
 
 ### Modules
 
 ```
-extendedreplay-api/           # Public extension API
-extendedreplay-core/          # Core event sourcing, replay logic
-extendedreplay-paper/         # Paper plugin entry point
-extendedreplay-transport/     # WebSocket/TCP/Loopback transports
-extendedreplay-storage/       # Segment files, metadata DB
-extendedreplay-renderer/      # Player rendering abstraction (Mannequin/NPC/DisplayEntity)
-extendedreplay-analysis/      # Route rendering, heatmaps
+extendedreplay/
+├── extendedreplay-api        Public API (ExtendedReplayApi via Bukkit ServicesManager)
+├── extendedreplay-core       Replay model, binary protocol, queues, metrics — pure Java
+├── extendedreplay-storage    zstd segment files + SQLite metadata index
+├── extendedreplay-transport  WebSocket client/server, batching, spooling, loopback
+└── extendedreplay-paper      The actual Paper plugin: capture, playback, GUI, commands
 ```
 
-### Design Principles
-
-- **Clean architecture** — clear interfaces, no tight coupling
-- **Renderer abstraction** — not hardwired to Mannequins
-- **Transport abstraction** — swap WebSocket for TCP, Redis, NATS later
-- **Storage abstraction** — segment-based design allows different backends
-- **Versioned protocol & format** — forward/backward compatibility path
-- **Performance-first producer** — main-thread capture only copies primitives; async for everything else
-- **No gameplay impact** — if replay fails, the game continues
-- **No fake features** — marked features work end-to-end or don't exist
-
-## Quick Start
-
-### Requirements
-
-- **Java 17+**
-- **Paper 1.20.1+** (or compatible version)
-- Maven 3.8+
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Raindancer118/ExtendedReplay.git
-   cd ExtendedReplay
-   ```
-
-2. **Build the plugin**
-   ```bash
-   mvn clean package
-   ```
-
-3. **Copy to your servers**
-   ```bash
-   # Producer (game server)
-   cp extendedreplay-paper/target/extendedreplay-*.jar /path/to/game-server/plugins/
-
-   # Replay (replay server)
-   cp extendedreplay-paper/target/extendedreplay-*.jar /path/to/replay-server/plugins/
-   ```
-
-4. **Configure roles** — Edit `plugins/ExtendedReplay/config.yml` on each server:
-
-   **Producer (hungergames.nak-lan.de)**
-   ```yaml
-   extendedreplay:
-     server-role: PRODUCER
-     producer:
-       enabled: true
-       player-frame-rate-hz: 20
-       capture-inventories: true
-       capture-containers: true
-       capture-block-changes: true
-     transport:
-       type: WEBSOCKET
-       host: replay.nak-lan.de
-       port: 8787
-       auth-token: "change-me"
-       reconnect: true
-   ```
-
-   **Replay (replay.nak-lan.de)**
-   ```yaml
-   extendedreplay:
-     server-role: REPLAY
-     replay-server:
-       bind-host: 0.0.0.0
-       bind-port: 8787
-     snapshots:
-       path: plugins/ExtendedReplay/snapshots
-       require-precomputed-snapshots: true
-   ```
-
-5. **Restart servers** and run `/erp status` to verify
-
-## Commands
-
-### Basic
-
-```
-/erp                    # Main help
-/erp status            # Check recording/replay state
-/erp gui               # Open moderator control GUI (REPLAY mode)
-```
-
-### Recording (Producer)
-
-```
-/erp record start <name>       # Start a new session
-/erp record stop               # End the current session
-/erp sessions                  # List all sessions
-```
-
-### Playback (Replay)
-
-```
-/erp play <sessionId>          # Play a session
-/erp pause                     # Pause playback
-/erp resume                    # Resume
-/erp speed <0.25|0.5|1|2|4|8>  # Set playback speed
-/erp time <timestamp>          # Jump to timestamp (ms)
-/erp jump <timestamp>          # Jump (shorthand)
-/erp rewind <seconds>          # Rewind N seconds
-/erp forward <seconds>         # Forward N seconds
-/erp live                      # Watch live mirror of current session
-```
-
-### Events & Analysis
-
-```
-/erp events                    # Open event browser
-/erp event <eventId>           # Show event details
-/erp jump event <eventId>      # Jump to event
-/erp bookmark <name>           # Create bookmark at current timestamp
-/erp bookmarks                 # List bookmarks
-/erp scene create <name>       # Save a scene
-/erp scene list                # List scenes
-/erp route render <player>     # Start route rendering async job
-/erp route clear               # Remove rendered routes
-/erp route mode <mode>         # Set rendering mode (carpet, glass, concrete, particles, heatmap)
-```
-
-### Camera & Navigation
-
-```
-/erp freecam                   # Toggle freecam
-/erp follow <player>           # Follow a player
-/erp pov <player>              # First-person view approximation
-/erp cam save <name>           # Save camera position
-/erp cam goto <name>           # Load camera position
-```
-
-### Inspection
-
-```
-/erp inspect player <player>   # Show player stats
-/erp inventory <player>        # Inspect player inventory at current timestamp
-/erp container <x> <y> <z>     # Inspect container contents
-```
-
-### Snapshots
-
-```
-/erp snapshot create <name>    # Create a world snapshot
-/erp snapshot list             # List snapshots
-/erp snapshot verify <name>    # Verify snapshot integrity
-```
-
-### Admin
-
-```
-/erp verify <sessionId>        # Verify replay integrity
-/erp delete <sessionId>        # Delete a session
-/erp favorite <sessionId>      # Mark as favorite
-/erp storage                   # Check storage usage
-/erp cleanup                   # Run retention policy
-```
-
-## Permissions
-
-```
-extendedreplay.use                 # Access plugin
-extendedreplay.moderator           # Record/playback control
-extendedreplay.director            # Full playback access
-extendedreplay.admin               # Admin commands
-extendedreplay.inventory.view      # Inspect inventories
-extendedreplay.container.view      # Inspect containers
-extendedreplay.route.render        # Render routes
-extendedreplay.snapshot            # Manage snapshots
-```
-
-## Integration: TheHungerGames
-
-ExtendedReplay is **independent** — it does not depend on TheHungerGames. However, TheHungerGames can optionally publish events via the ExtendedReplay API:
-
-```java
-ExtendedReplayApi api = Bukkit.getServicesManager()
-    .load(ExtendedReplayApi.class);
-
-if (api != null) {
-    ReplayEvent killEvent = new ReplayEvent(
-        "HG_KILL",
-        UUID.randomUUID(),
-        Bukkit.getServer().getCurrentTick(),
-        Map.of(
-            "killer", killer.getName(),
-            "victim", victim.getName(),
-            "weapon", victim.getKiller().getInventory().getItemInMainHand().getType().toString()
-        )
-    );
-    api.recordEvent(sessionId, killEvent);
-}
-```
-
-See `extendedreplay-integration-example` for a complete adapter.
-
-## Configuration Example
-
-```yaml
-extendedreplay:
-  server-role: PRODUCER  # or REPLAY, STANDALONE, DISABLED
-
-  commands:
-    main-command: erp
-    aliases:
-      - extendedreplay
-      - replayx
-
-  producer:
-    enabled: true
-    player-frame-rate-hz: 20
-    capture-inventories: true
-    capture-containers: true
-    capture-block-changes: true
-    capture-entities: true
-    capture-projectiles: true
-    capture-chat: true
-    capture-world-border: true
-    capture-weather-time: true
-
-  performance:
-    main-thread-capture-target-ms: 0.25
-    main-thread-capture-hard-budget-ms: 1.0
-    adaptive-degradation: true
-    max-queue-size: 100000
-    drop-cosmetic-frames-under-pressure: true
-    never-block-game-server: true
-
-  transport:
-    type: WEBSOCKET          # or TCP
-    host: replay.nak-lan.de
-    port: 8787
-    auth-token: change-me
-    reconnect: true
-    batch-interval-ms: 50
-    spool-on-disconnect: true
-    max-spool-size-mb: 1024
-
-  replay-server:
-    bind-host: 0.0.0.0
-    bind-port: 8787
-    live-delay-seconds: 2
-    allow-multiple-playback-sessions: true
-    max-playback-sessions: 5
-
-  storage:
-    path: plugins/ExtendedReplay/replays
-    metadata-database: sqlite
-    compression: zstd
-    segment-length-seconds: 30
-    max-days: 30
-    max-gb: 100
-    keep-favorites: true
-
-  snapshots:
-    path: plugins/ExtendedReplay/snapshots
-    require-precomputed-snapshots: true
-    keyframe-interval-seconds: 300
-    create-keyframes-on-replay-server: true
-
-  renderer:
-    preferred-player-renderer: MANNEQUIN
-    fallback-player-renderer: NPC
-    show-nametags: true
-    show-health: true
-    show-held-items: true
-    show-armor: true
-
-  analysis:
-    route-rendering: true
-    heatmaps: true
-    max-block-changes-per-tick: 1000
-    default-route-mode: CARPET
-    render-in-analysis-world: true
-    restore-original-blocks: true
-```
-
-## Development
-
-### Building
-
-```bash
-mvn clean package -DskipTests
-```
-
-### Testing Locally
-
-```bash
-# Start local single-server mode (STANDALONE)
-# 1. Create snapshot of your test arena
-#    /erp snapshot create test-arena
-
-# 2. Start recording
-#    /erp record start test-match
-
-# 3. Move players around, open chests, kill mobs
-# 4. Stop recording
-#    /erp record stop
-
-# 5. Play back the session
-#    /erp play <session-id>
-
-# 6. Test commands
-#    /erp events
-#    /erp inventory <player>
-#    /erp route render <player>
-#    /erp verify <session-id>
-```
-
-### Acceptance Criteria
-
-The implementation is production-ready when this works end-to-end:
-
-1. ✅ Install on producer and replay servers, configure roles
-2. ✅ Create snapshot
-3. ✅ Start session, move players, change blocks, open chests, kill player, end session
-4. ✅ Join replay server, open sessions list, play session
-5. ✅ See player Mannequins with correct skins/equipment
-6. ✅ Jump to events (start, kill, end) via `/erp events`
-7. ✅ Inspect player inventory and chest at any timestamp
-8. ✅ Render player routes
-9. ✅ Verify replay integrity
-10. ✅ Game server did not block on replay operations
-
-## Performance Guarantees
-
-- **Main-thread capture** — target <0.25ms, hard budget 1.0ms per tick
-- **Never blocks gameplay** — queue, network, storage, compression all async
-- **Zero JSON in 20 Hz frames** — compact binary protocol
-- **Adaptive degradation** — drops cosmetic data under load, preserves critical events
-- **Configurable frame rate** — default 20 Hz, adjustable
-- **Producer spool** — queues data locally if replay server disconnects
-
-## Non-Goals (Phase 1)
-
-- Video rendering / `.mcpr` export
-- Web dashboard
-- Full anti-cheat integration
-- Perfect client POV reproduction
-- Dependency on TheHungerGames
-
-## Roadmap
-
-### Phase 1: Plugin Skeleton & Config ✅
-### Phase 2: Local Recording MVP
-### Phase 3: Producer/Replay Transport
-### Phase 4: Live Mirror World
-### Phase 5: Events & GUI
-### Phase 6: Inventories & Containers
-### Phase 7: Block/Entity Deltas
-### Phase 8: Persistent Playback
-### Phase 9: Route Rendering
-### Phase 10: Polish & Reliability
-
-## License
-
-TODO — Add appropriate license
-
-## Contributing
-
-Contributions welcome! Please ensure:
-- Code follows existing style conventions
-- Features are complete and tested (no stubs/TODOs)
-- Documentation is updated
-- Commits follow conventional style
-
-## Support & Issues
-
-Report bugs and feature requests on [GitHub Issues](https://github.com/Raindancer118/ExtendedReplay/issues).
+The dependency direction is strict: `paper → {api, core, storage, transport}` and
+`{storage, transport} → core`. Core knows nothing about Bukkit.
+
+### Recording model — event sourcing
+
+A replay session is **not** a series of world dumps. It consists of:
+
+1. a reference to a **precomputed arena snapshot** (the world as it was at match start),
+2. a **20 Hz player frame stream** (compact primitives — no ItemStacks, no NBT, no JSON),
+3. **event-based deltas**: block changes, inventory/container snapshots (only when their
+   content hash actually changed), equipment changes (versioned, referenced from frames),
+   entity/projectile/item events,
+4. a **timeline of discrete events** (kills, deaths, chat, custom events, bookmarks),
+5. replay-server-generated **keyframes** for fast seeking.
+
+Under load, the pipeline degrades gracefully: cosmetic data (particle-level frames,
+item movement) is dropped first and counted; critical events (kills, inventories, block
+changes) are always preserved. Degraded time ranges are marked in the recording.
+
+### Wire format
+
+High-frequency data uses a compact binary protocol — varints, player indexes instead of
+UUIDs, angles as single bytes, fixed-point health. Batches are zstd-compressed off the
+main thread. Handshake with protocol version + auth token. Unknown packet types are
+skipped, so newer producers keep working with older replay servers.
 
 ---
 
-**ExtendedReplay** — Redefining Minecraft replay analysis. 🎮
+## 🚀 Quick Start
+
+### Requirements
+
+- Java **21+**
+- Paper **1.21.10** (or newer)
+- Two servers for the production setup (one is fine for `STANDALONE` testing)
+
+### Build
+
+```bash
+./gradlew build
+# → extendedreplay-paper/build/libs/ExtendedReplay-<version>.jar
+```
+
+Third-party libraries (SQLite, zstd, WebSocket) are **not** shaded — Paper's plugin
+library loader resolves them at startup from Maven Central.
+
+### Install
+
+1. Drop `ExtendedReplay-<version>.jar` into `plugins/` on **both** servers.
+2. Start once, then edit `plugins/ExtendedReplay/config.yml`:
+
+**Game server** (`hungergames.example.com`):
+
+```yaml
+extendedreplay:
+  server-role: PRODUCER
+
+transport:
+  host: replay.example.com
+  port: 8787
+  auth-token: "pick-a-long-random-secret"
+```
+
+**Replay server** (`replay.example.com`):
+
+```yaml
+extendedreplay:
+  server-role: REPLAY
+
+replay-server:
+  bind-host: 0.0.0.0
+  bind-port: 8787
+
+transport:
+  auth-token: "pick-a-long-random-secret"   # must match the producer
+```
+
+3. Restart both. The producer connects automatically and reconnects with backoff.
+
+### Record & watch
+
+```
+# on the game server (or via the API from your minigame plugin)
+/erp record start match-42
+... play the match ...
+/erp record stop
+
+# on the replay server
+/erp sessions              # list stored sessions
+/erp play <sessionId>      # open a playback session
+/erp events                # browse & jump to kills, chests, custom events
+/erp inventory <player>    # inspect an inventory at the current replay time
+/erp route render <player> # draw a player's path
+```
+
+---
+
+## 🎮 Commands
+
+`/erp` (aliases: `/extendedreplay`, `/replayx`)
+
+<details>
+<summary><b>Full command reference</b></summary>
+
+| Group | Commands |
+|-------|----------|
+| **General** | `/erp` · `gui` · `help` · `status` · `test` |
+| **Recording** | `record start <name>` · `record stop` · `sessions` · `session <id>` |
+| **Playback** | `play <id>` · `pause` · `resume` · `speed <0.25–8>` · `jump <time>` · `rewind <s>` · `forward <s>` · `close` |
+| **Live** | `live` |
+| **Events** | `events` · `event <id>` · `jump event <id>` · `bookmark <name>` · `bookmarks` |
+| **Scenes** | `scene create <name>` · `scene list` · `scene open <name>` · `scene delete <name>` |
+| **Camera** | `freecam` · `follow <player>` · `pov <player>` · `cam save/goto/list/delete <name>` |
+| **Inspection** | `inspect player <p>` · `inspect chest` · `inventory <p>` · `container <x> <y> <z>` |
+| **Analysis** | `route render <p\|all> [start] [end]` · `route cancel` · `route clear` · `route mode <mode>` · `heatmap <kind>` |
+| **Snapshots** | `snapshot create/list/info/verify/delete <name>` |
+| **Admin** | `verify <id>` · `reindex <id>` · `delete <id>` · `favorite <id>` · `storage` · `cleanup` |
+
+</details>
+
+Moderators in a replay session also get a **hotbar control UI** — play/pause, timeline,
+event browser, player follow, camera, routes, inspection, speed and exit on slots 1–9.
+
+---
+
+## 🔌 API for other plugins
+
+ExtendedReplay is fully standalone, but any plugin can integrate through the public API
+(registered in Bukkit's `ServicesManager`). This is how e.g. **TheHungerGames** publishes
+its match lifecycle — the dependency direction is always `YourPlugin → ExtendedReplay`,
+never the other way around.
+
+```java
+RegisteredServiceProvider<ExtendedReplayApi> reg =
+        Bukkit.getServicesManager().getRegistration(ExtendedReplayApi.class);
+if (reg == null) return;                      // ExtendedReplay not installed — fine!
+ExtendedReplayApi replay = reg.getProvider();
+
+// start a recording session for your match
+ReplaySessionHandle session = replay.startSession(
+        ReplaySessionStartRequest.builder("hg-match-42", arenaWorld)
+                .externalKey(match.getId())
+                .bounds(ReplayBounds.cuboid(-200, 0, -200, 200, 256, 200))
+                .metadata("gamemode", "hungergames")
+                .build());
+
+// record custom events — they show up in the event browser
+session.recordEvent(ReplayEvent.builder("HG_SUPPLY_DROP_SPAWN", ReplayEventCategory.SUPPLY)
+        .location(dropLocation)
+        .metadata("loot-table", "supply_tier_2")
+        .build());
+
+session.createBookmark(ReplayBookmark.now("final-fight"));
+session.end(ReplaySessionEndReason.COMPLETED);
+```
+
+---
+
+## 📊 Project Status
+
+The foundation is built and tested; the Paper plugin layer is under active development.
+
+| Component | State |
+|-----------|-------|
+| Public API (`extendedreplay-api`) | ✅ implemented |
+| Binary protocol + replay model (`extendedreplay-core`) | ✅ implemented & unit-tested |
+| Segment storage + SQLite index (`extendedreplay-storage`) | ✅ implemented & unit-tested |
+| WebSocket transport + disk spooling (`extendedreplay-transport`) | ✅ implemented & integration-tested |
+| Paper plugin: capture, playback, GUI, commands (`extendedreplay-paper`) | 🚧 in development |
+| Route rendering & heatmaps | 🚧 in development |
+| Arena snapshots | 🚧 in development |
+
+**Design principles** (non-negotiable):
+
+- 🚫 The game server never blocks on replay work — no disk, network, JSON or compression
+  on the main thread.
+- 🚫 No fake features: what's marked implemented works end-to-end.
+- ✅ Renderer, transport and storage are abstractions — nothing is hardwired to
+  Mannequins, WebSockets or SQLite.
+- ✅ Versioned protocol and file format from day one.
+
+---
+
+## 🛠️ Development
+
+```bash
+./gradlew build                          # build everything + run all tests
+./gradlew test                           # tests only
+./gradlew :extendedreplay-core:test      # tests of one module
+```
+
+The test suite covers the binary codec (roundtrips for every packet type), the recording
+queue's drop policy, the full storage lifecycle (record → seal → verify → corrupt →
+detect), and transport end-to-end tests including auth rejection and spool recovery
+after a dead replay server comes back up.
+
+---
+
+<div align="center">
+
+**ExtendedReplay** · built for [nak-lan.de](https://nak-lan.de)
+
+</div>

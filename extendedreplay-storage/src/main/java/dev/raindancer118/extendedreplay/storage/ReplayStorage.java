@@ -1,0 +1,335 @@
+package dev.raindancer118.extendedreplay.storage;
+
+import dev.raindancer118.extendedreplay.core.FormatConstants;
+import dev.raindancer118.extendedreplay.core.model.PlayerProfileData;
+import dev.raindancer118.extendedreplay.core.pipeline.CaptureMetrics;
+import dev.raindancer118.extendedreplay.core.protocol.ReplayPacket;
+import dev.raindancer118.extendedreplay.storage.meta.EventRecord;
+import dev.raindancer118.extendedreplay.storage.meta.MetadataDatabase;
+import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
+import dev.raindancer118.extendedreplay.storage.segment.SegmentFile;
+import dev.raindancer118.extendedreplay.storage.segment.SegmentReader;
+import dev.raindancer118.extendedreplay.storage.segment.SegmentWriter;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+
+/**
+ * Persistence facade: ingests {@link ReplayPacket}s of one or more sessions into segment
+ * files and the metadata index, and reads sessions back for playback.
+ *
+ * <p>Ingestion methods must be called from a single background pipeline thread — never
+ * from the server main thread. Read methods may be called from any thread.</p>
+ */
+public final class ReplayStorage implements AutoCloseable {
+
+    private final Path replaysDirectory;
+    private final MetadataDatabase database;
+    private final int segmentLengthSeconds;
+    private final CaptureMetrics metrics;
+
+    private final Map<UUID, SegmentWriter> writers = new HashMap<>();
+    private final Map<UUID, Map<Integer, UUID>> playerIndexToUuid = new HashMap<>();
+    private final Map<UUID, Integer> lastTicks = new HashMap<>();
+
+    public ReplayStorage(Path replaysDirectory, int segmentLengthSeconds, CaptureMetrics metrics)
+            throws SQLException, IOException {
+        this.replaysDirectory = replaysDirectory;
+        this.segmentLengthSeconds = segmentLengthSeconds;
+        this.metrics = metrics;
+        Files.createDirectories(replaysDirectory);
+        this.database = new MetadataDatabase(replaysDirectory.resolve("metadata.db"));
+    }
+
+    public MetadataDatabase database() {
+        return database;
+    }
+
+    public Path sessionDirectory(UUID sessionId) {
+        return replaysDirectory.resolve(sessionId.toString());
+    }
+
+    // --- ingestion (pipeline thread only) ---
+
+    /** Routes one packet into the session's segment writer and metadata index. */
+    public void ingest(ReplayPacket packet) throws IOException, SQLException {
+        switch (packet) {
+            case ReplayPacket.SessionStart p -> {
+                database.insertSession(new SessionRecord(p.sessionId(), p.name(), p.externalKey(),
+                        p.worldName(), p.startedAtMillis(), 0, 0, null, null, false,
+                        p.formatVersion()));
+                writers.put(p.sessionId(),
+                        new SegmentWriter(sessionDirectory(p.sessionId()), p.sessionId(),
+                                segmentLengthSeconds));
+                playerIndexToUuid.put(p.sessionId(), new HashMap<>());
+                lastTicks.put(p.sessionId(), 0);
+                appendToSegment(p.sessionId(), packet);
+            }
+            case ReplayPacket.SessionEnd p -> {
+                appendToSegment(p.sessionId(), packet);
+                sealSession(p.sessionId());
+                database.finishSession(p.sessionId(), System.currentTimeMillis(), p.tick(), p.reason());
+                playerIndexToUuid.remove(p.sessionId());
+                lastTicks.remove(p.sessionId());
+            }
+            case ReplayPacket.SnapshotReference p -> {
+                database.setSnapshotName(p.sessionId(), p.snapshotName());
+                appendToSegment(p.sessionId(), packet);
+            }
+            case ReplayPacket.PlayerProfile p -> {
+                database.insertPlayer(p.sessionId(), p.profile());
+                Map<Integer, UUID> mapping = playerIndexToUuid.get(p.sessionId());
+                if (mapping != null) {
+                    mapping.put(p.profile().playerIndex(), p.profile().uuid());
+                }
+                appendToSegment(p.sessionId(), packet);
+            }
+            case ReplayPacket.TimelineEventPacket p -> {
+                Map<Integer, UUID> mapping = playerIndexToUuid.getOrDefault(p.sessionId(), Map.of());
+                var e = p.event();
+                database.insertEvent(p.sessionId(), e.tick(), e.eventType(), e.category(),
+                        mapping.get(e.actorPlayerIndex()), mapping.get(e.targetPlayerIndex()),
+                        e.worldName(), e.x(), e.y(), e.z(), e.metadata());
+                metrics.addEvent();
+                appendToSegment(p.sessionId(), packet);
+            }
+            case ReplayPacket.Heartbeat ignored -> {
+                // transport-level, not persisted
+            }
+            case ReplayPacket.Metrics ignored -> {
+                // transport-level, not persisted
+            }
+            case ReplayPacket.Handshake ignored -> {
+                // transport-level, not persisted
+            }
+            case ReplayPacket.HandshakeAck ignored -> {
+                // transport-level, not persisted
+            }
+            default -> {
+                UUID sessionId = sessionIdOf(packet);
+                if (sessionId != null) {
+                    appendToSegment(sessionId, packet);
+                }
+            }
+        }
+        UUID sessionId = sessionIdOf(packet);
+        if (sessionId != null && packet.tick() >= 0) {
+            lastTicks.merge(sessionId, packet.tick(), Math::max);
+        }
+    }
+
+    private void appendToSegment(UUID sessionId, ReplayPacket packet) throws IOException, SQLException {
+        SegmentWriter writer = writers.get(sessionId);
+        if (writer == null) {
+            // Session unknown (e.g. replay server restarted mid-session): recover a writer.
+            writer = new SegmentWriter(sessionDirectory(sessionId), sessionId, segmentLengthSeconds);
+            writers.put(sessionId, writer);
+        }
+        SegmentFile sealed = writer.append(packet);
+        if (sealed != null) {
+            database.insertSegment(sealed);
+            metrics.addSegment(sealed.compressedBytes());
+        }
+    }
+
+    /** Seals open segments of the session. Safe to call twice. */
+    public void sealSession(UUID sessionId) throws IOException, SQLException {
+        SegmentWriter writer = writers.remove(sessionId);
+        if (writer != null) {
+            SegmentFile sealed = writer.seal();
+            if (sealed != null) {
+                database.insertSegment(sealed);
+                metrics.addSegment(sealed.compressedBytes());
+            }
+        }
+    }
+
+    /** Seals everything, e.g. on shutdown. Updates last known tick so sessions stay usable. */
+    public void sealAll(String endReason) {
+        for (UUID sessionId : List.copyOf(writers.keySet())) {
+            try {
+                sealSession(sessionId);
+                database.finishSession(sessionId, System.currentTimeMillis(),
+                        lastTicks.getOrDefault(sessionId, 0), endReason);
+            } catch (IOException | SQLException e) {
+                // best effort during shutdown
+            }
+        }
+    }
+
+    private static UUID sessionIdOf(ReplayPacket packet) {
+        return switch (packet) {
+            case ReplayPacket.SessionStart p -> p.sessionId();
+            case ReplayPacket.SessionEnd p -> p.sessionId();
+            case ReplayPacket.SnapshotReference p -> p.sessionId();
+            case ReplayPacket.PlayerProfile p -> p.sessionId();
+            case ReplayPacket.PlayerFramePacket p -> p.sessionId();
+            case ReplayPacket.EquipmentChangePacket p -> p.sessionId();
+            case ReplayPacket.InventorySnapshotPacket p -> p.sessionId();
+            case ReplayPacket.ContainerSnapshotPacket p -> p.sessionId();
+            case ReplayPacket.BlockChangePacket p -> p.sessionId();
+            case ReplayPacket.EntitySpawn p -> p.sessionId();
+            case ReplayPacket.EntityDespawn p -> p.sessionId();
+            case ReplayPacket.EntityFramePacket p -> p.sessionId();
+            case ReplayPacket.TimelineEventPacket p -> p.sessionId();
+            case ReplayPacket.PlayerJoin p -> p.sessionId();
+            case ReplayPacket.PlayerQuit p -> p.sessionId();
+            case ReplayPacket.DegradationMarker p -> p.sessionId();
+            case ReplayPacket.Handshake ignored -> null;
+            case ReplayPacket.HandshakeAck ignored -> null;
+            case ReplayPacket.Heartbeat ignored -> null;
+            case ReplayPacket.Metrics ignored -> null;
+        };
+    }
+
+    // --- reading ---
+
+    public Optional<SessionRecord> getSession(UUID sessionId) throws SQLException {
+        return database.getSession(sessionId);
+    }
+
+    public List<SessionRecord> listSessions(int limit) throws SQLException {
+        return database.listSessions(limit);
+    }
+
+    public List<PlayerProfileData> listPlayers(UUID sessionId) throws SQLException {
+        return database.listPlayers(sessionId);
+    }
+
+    public List<EventRecord> listEvents(UUID sessionId, String category, int limit) throws SQLException {
+        return database.listEvents(sessionId, category, limit);
+    }
+
+    /**
+     * Streams all packets of a session in tick order to the consumer.
+     * Reads segment files listed in the index; falls back to a directory scan when the
+     * index has no rows (e.g. after a crash before the DB row was written).
+     */
+    public void readSession(UUID sessionId, Consumer<ReplayPacket> consumer) throws IOException, SQLException {
+        for (Path file : segmentPaths(sessionId)) {
+            SegmentReader.SegmentContent content = SegmentReader.read(file);
+            content.packets().forEach(consumer);
+        }
+    }
+
+    /** All packets of a session, tick-sorted. Convenient for playback preparation. */
+    public List<ReplayPacket> loadSession(UUID sessionId) throws IOException, SQLException {
+        List<ReplayPacket> packets = new ArrayList<>();
+        readSession(sessionId, packets::add);
+        packets.sort(Comparator.comparingInt(p -> Math.max(p.tick(), 0)));
+        return packets;
+    }
+
+    private List<Path> segmentPaths(UUID sessionId) throws SQLException, IOException {
+        Path directory = sessionDirectory(sessionId);
+        List<SegmentFile> indexed = database.listSegments(sessionId);
+        if (!indexed.isEmpty()) {
+            List<Path> paths = new ArrayList<>(indexed.size());
+            for (SegmentFile segment : indexed) {
+                Path file = directory.resolve(segment.fileName());
+                if (Files.exists(file)) {
+                    paths.add(file);
+                }
+            }
+            return paths;
+        }
+        if (!Files.isDirectory(directory)) {
+            return List.of();
+        }
+        try (Stream<Path> stream = Files.list(directory)) {
+            return stream.filter(p -> p.getFileName().toString().endsWith(".erps"))
+                    .sorted()
+                    .toList();
+        }
+    }
+
+    /** Verifies all segments of a session. Returns human-readable problem list, empty when OK. */
+    public List<String> verifySession(UUID sessionId) throws SQLException {
+        List<String> problems = new ArrayList<>();
+        try {
+            List<SegmentFile> indexed = database.listSegments(sessionId);
+            Path directory = sessionDirectory(sessionId);
+            if (indexed.isEmpty()) {
+                problems.add("No segments indexed for session " + sessionId);
+            }
+            int expectedIndex = 0;
+            for (SegmentFile segment : indexed) {
+                if (segment.index() != expectedIndex) {
+                    problems.add("Segment gap: expected index " + expectedIndex + " but found "
+                            + segment.index());
+                }
+                expectedIndex = segment.index() + 1;
+                Path file = directory.resolve(segment.fileName());
+                if (!Files.exists(file)) {
+                    problems.add("Missing segment file: " + segment.fileName());
+                    continue;
+                }
+                try {
+                    SegmentFile actual = SegmentReader.verify(file);
+                    if (actual.crc32() != segment.crc32()) {
+                        problems.add("CRC mismatch vs index in " + segment.fileName());
+                    }
+                    if (actual.packetCount() != segment.packetCount()) {
+                        problems.add("Packet count mismatch vs index in " + segment.fileName());
+                    }
+                } catch (IOException e) {
+                    problems.add("Corrupt segment " + segment.fileName() + ": " + e.getMessage());
+                }
+            }
+        } catch (SQLException e) {
+            throw e;
+        }
+        return problems;
+    }
+
+    /** Deletes session data from disk and index. */
+    public void deleteSessionData(UUID sessionId) throws SQLException, IOException {
+        database.deleteSession(sessionId);
+        Path directory = sessionDirectory(sessionId);
+        if (Files.isDirectory(directory)) {
+            try (Stream<Path> stream = Files.list(directory)) {
+                for (Path file : stream.toList()) {
+                    Files.deleteIfExists(file);
+                }
+            }
+            Files.deleteIfExists(directory);
+        }
+    }
+
+    /** Total bytes of all stored segment files. */
+    public long storageBytes() throws IOException {
+        if (!Files.isDirectory(replaysDirectory)) {
+            return 0;
+        }
+        try (Stream<Path> stream = Files.walk(replaysDirectory)) {
+            return stream.filter(Files::isRegularFile).mapToLong(p -> {
+                try {
+                    return Files.size(p);
+                } catch (IOException e) {
+                    return 0;
+                }
+            }).sum();
+        }
+    }
+
+    public int formatVersion() {
+        return FormatConstants.FORMAT_VERSION;
+    }
+
+    @Override
+    public void close() {
+        sealAll("SERVER_SHUTDOWN");
+        database.close();
+    }
+}
