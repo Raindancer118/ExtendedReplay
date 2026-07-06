@@ -47,6 +47,8 @@ storage:
 
 snapshots:
   path: plugins/ExtendedReplay/snapshots
+  # playback keyframe spacing: smaller = faster backward seeks, more memory
+  keyframe-interval-seconds: 300
 
 renderer:
   # MANNEQUIN (native, preferred) or ARMOR_STAND (fallback)

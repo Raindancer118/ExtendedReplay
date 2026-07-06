@@ -172,4 +172,59 @@ class ReplayStorageTest {
         recordSampleSession();
         assertThat(storage.storageBytes()).isGreaterThan(0);
     }
+
+    @Test
+    void reindexRebuildsMetadataFromSegments() throws Exception {
+        recordSampleSession();
+        // simulate index loss
+        storage.database().deleteSession(sessionId);
+        assertThat(storage.getSession(sessionId)).isEmpty();
+
+        int packets = storage.reindex(sessionId);
+        assertThat(packets).isGreaterThan(1300);
+
+        SessionRecord record = storage.getSession(sessionId).orElseThrow();
+        assertThat(record.name()).isEqualTo("test-match");
+        assertThat(record.endReason()).isEqualTo("COMPLETED");
+        assertThat(storage.listPlayers(sessionId)).hasSize(2);
+        assertThat(storage.listEvents(sessionId, null, 100)).hasSize(1);
+        assertThat(storage.verifySession(sessionId)).isEmpty();
+    }
+
+    @Test
+    void cleanupDeletesOldNonFavoriteSessions() throws Exception {
+        recordSampleSession();
+        // make the session look 40 days old
+        var record = storage.getSession(sessionId).orElseThrow();
+        storage.database().insertSession(new SessionRecord(record.sessionId(), record.name(),
+                record.externalKey(), record.worldName(),
+                System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000,
+                record.endedAtMillis(), record.lastTick(), record.endReason(),
+                record.snapshotName(), false, record.formatVersion()));
+
+        var deleted = storage.cleanup(30, Long.MAX_VALUE);
+        assertThat(deleted).containsExactly(sessionId);
+        assertThat(storage.getSession(sessionId)).isEmpty();
+    }
+
+    @Test
+    void cleanupSparesFavorites() throws Exception {
+        recordSampleSession();
+        var record = storage.getSession(sessionId).orElseThrow();
+        storage.database().insertSession(new SessionRecord(record.sessionId(), record.name(),
+                record.externalKey(), record.worldName(),
+                System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000,
+                record.endedAtMillis(), record.lastTick(), record.endReason(),
+                record.snapshotName(), true, record.formatVersion()));
+
+        assertThat(storage.cleanup(30, Long.MAX_VALUE)).isEmpty();
+        assertThat(storage.getSession(sessionId)).isPresent();
+    }
+
+    @Test
+    void cleanupEnforcesSizeCap() throws Exception {
+        recordSampleSession();
+        var deleted = storage.cleanup(1000, 1); // 1 byte cap forces deletion
+        assertThat(deleted).containsExactly(sessionId);
+    }
 }

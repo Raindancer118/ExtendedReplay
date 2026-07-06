@@ -33,19 +33,28 @@ public final class PlaybackManager {
     private final ReplayConfig config;
     private final ReplayServerManager replayServer;
     private final dev.raindancer118.extendedreplay.paper.gui.HotbarUI hotbar;
+    private final dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots;
     private final Map<UUID, PlaybackSession> sessionsByViewer = new HashMap<>();
     private final Map<UUID, PlaybackSession> sessionsById = new HashMap<>();
     private final Map<UUID, org.bukkit.inventory.ItemStack[]> savedInventories = new HashMap<>();
     private final Map<UUID, GameMode> savedGameModes = new HashMap<>();
+    private final Map<UUID, Map<String, Location>> savedCameras = new HashMap<>();
     private BukkitTask tickTask;
     private int worldCounter;
 
     public PlaybackManager(Plugin plugin, ReplayConfig config, ReplayServerManager replayServer,
-                           dev.raindancer118.extendedreplay.paper.gui.HotbarUI hotbar) {
+                           dev.raindancer118.extendedreplay.paper.gui.HotbarUI hotbar,
+                           dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots) {
         this.plugin = plugin;
         this.config = config;
         this.replayServer = replayServer;
         this.hotbar = hotbar;
+        this.snapshots = snapshots;
+    }
+
+    /** Per-viewer named camera positions (session-scoped, in memory). */
+    public Map<String, Location> camerasOf(Player viewer) {
+        return savedCameras.computeIfAbsent(viewer.getUniqueId(), k -> new HashMap<>());
     }
 
     public void start() {
@@ -81,8 +90,21 @@ public final class PlaybackManager {
         }
         for (UUID viewerId : session.viewers()) {
             Player viewer = Bukkit.getPlayer(viewerId);
-            if (viewer != null && viewer.getWorld().equals(session.world())
-                    && viewer.getLocation().distanceSquared(target) > 9) {
+            if (viewer == null || !viewer.getWorld().equals(session.world())) {
+                continue;
+            }
+            if (session.isPovMode()) {
+                // first-person approximation: eye position + recorded view direction
+                var frame = session.lastFrame(followed);
+                Location eye = target.clone().add(0, 1.62, 0);
+                if (frame != null) {
+                    eye.setYaw(dev.raindancer118.extendedreplay.core.protocol.PacketIO
+                            .byteToAngle(frame.yaw()));
+                    eye.setPitch(dev.raindancer118.extendedreplay.core.protocol.PacketIO
+                            .byteToAngle(frame.pitch()));
+                }
+                viewer.teleport(eye);
+            } else if (viewer.getLocation().distanceSquared(target) > 9) {
                 viewer.teleport(target.clone().add(0, 3, 0));
             }
         }
@@ -116,16 +138,38 @@ public final class PlaybackManager {
                 return;
             }
             String finalName = name;
+            String snapshotName;
+            try {
+                snapshotName = replayServer.storage().getSession(sessionId)
+                        .map(r -> r.snapshotName()).orElse(null);
+            } catch (SQLException e) {
+                snapshotName = null;
+            }
+            String finalSnapshotName = snapshotName;
             Bukkit.getScheduler().runTask(plugin, () -> {
                 try {
                     World world = PlaybackWorlds.getOrCreate(
                             config.playbackWorldPrefix() + "_" + (worldCounter++));
                     PlaybackSession session = new PlaybackSession(sessionId, finalName, world,
-                            createRenderer(), packets);
-                    session.seek(0);
+                            createRenderer(), packets,
+                            config.keyframeIntervalSeconds() * 20);
                     sessionsById.put(sessionId, session);
-                    attachViewer(session, viewer);
-                    future.complete(session);
+
+                    Runnable finish = () -> {
+                        session.seek(0);
+                        attachViewer(session, viewer);
+                        future.complete(session);
+                    };
+                    // arena base state first, if the session references a local snapshot
+                    if (finalSnapshotName != null && snapshots.exists(finalSnapshotName)) {
+                        viewer.sendMessage(net.kyori.adventure.text.Component.text(
+                                "Wende Arena-Snapshot '" + finalSnapshotName + "' an…"));
+                        snapshots.apply(finalSnapshotName, world, viewer)
+                                .whenComplete((written, error) ->
+                                        Bukkit.getScheduler().runTask(plugin, finish));
+                    } else {
+                        finish.run();
+                    }
                 } catch (Exception e) {
                     future.completeExceptionally(e);
                 }

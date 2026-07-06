@@ -223,6 +223,127 @@ public final class RouteManager {
         });
     }
 
+    // --- heatmaps ---
+
+    /** Intensity gradient, cold → hot. */
+    private static final Material[] HEAT_GRADIENT = {
+            Material.WHITE_CONCRETE, Material.YELLOW_CONCRETE, Material.ORANGE_CONCRETE,
+            Material.RED_CONCRETE, Material.MAGENTA_CONCRETE};
+
+    /**
+     * Renders a movement heatmap: frame density per block column, drawn as color-graded
+     * concrete at the position players actually moved through.
+     */
+    public void renderMovementHeatmap(Player moderator, PlaybackSession playback) {
+        if (jobRunning) {
+            moderator.sendMessage(Component.text("Es läuft bereits ein Render-Job."));
+            return;
+        }
+        jobRunning = true;
+        cancelRequested = false;
+        UUID sessionId = playback.sessionId();
+        World world = playback.world();
+        BossBar bar = BossBar.bossBar(Component.text("Heatmap: lese Frames…"), 0f,
+                BossBar.Color.RED, BossBar.Overlay.PROGRESS);
+        moderator.showBossBar(bar);
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                Map<BlockPos, Integer> counts = new LinkedHashMap<>();
+                storage.readSession(sessionId, packet -> {
+                    if (packet instanceof ReplayPacket.PlayerFramePacket p) {
+                        PlayerFrame frame = p.frame();
+                        BlockPos pos = new BlockPos((int) Math.floor(frame.x()),
+                                (int) Math.floor(frame.y()), (int) Math.floor(frame.z()));
+                        counts.merge(pos, 1, Integer::sum);
+                    }
+                });
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        applyHeatmap(moderator, bar, world, counts));
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.WARNING, "Heatmap job failed", e);
+                finishJob(moderator, bar, "Heatmap fehlgeschlagen: " + e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * Renders an event heatmap (kills/deaths/loot/…): one graded marker per event
+     * location bin, hotter where more events happened.
+     */
+    public void renderEventHeatmap(Player moderator, PlaybackSession playback, String category) {
+        if (jobRunning) {
+            moderator.sendMessage(Component.text("Es läuft bereits ein Render-Job."));
+            return;
+        }
+        jobRunning = true;
+        cancelRequested = false;
+        World world = playback.world();
+        BossBar bar = BossBar.bossBar(Component.text("Heatmap: lese Events…"), 0f,
+                BossBar.Color.RED, BossBar.Overlay.PROGRESS);
+        moderator.showBossBar(bar);
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                Map<BlockPos, Integer> counts = new LinkedHashMap<>();
+                for (var event : storage.listEvents(playback.sessionId(), category, 100_000)) {
+                    if (!event.hasLocation()) {
+                        continue;
+                    }
+                    BlockPos pos = new BlockPos((int) Math.floor(event.x()),
+                            (int) Math.floor(event.y()), (int) Math.floor(event.z()));
+                    counts.merge(pos, 1, Integer::sum);
+                }
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        applyHeatmap(moderator, bar, world, counts));
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.WARNING, "Heatmap job failed", e);
+                finishJob(moderator, bar, "Heatmap fehlgeschlagen: " + e.getMessage());
+            }
+        });
+    }
+
+    /** Main thread: budgeted placement of intensity-graded markers. */
+    private void applyHeatmap(Player moderator, BossBar bar, World world,
+                              Map<BlockPos, Integer> counts) {
+        if (counts.isEmpty()) {
+            finishJob(moderator, bar, "Keine Daten für die Heatmap.");
+            return;
+        }
+        int max = counts.values().stream().mapToInt(Integer::intValue).max().orElse(1);
+        List<Map.Entry<BlockPos, Integer>> queue = new ArrayList<>(counts.entrySet());
+        int budget = Math.max(1, config.maxBlockChangesPerTick());
+        int total = queue.size();
+
+        Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+            if (cancelRequested) {
+                task.cancel();
+                finishJob(moderator, bar, "Heatmap-Job abgebrochen.");
+                return;
+            }
+            int placed = 0;
+            while (!queue.isEmpty() && placed < budget) {
+                Map.Entry<BlockPos, Integer> entry = queue.remove(queue.size() - 1);
+                double normalized = Math.log1p(entry.getValue()) / Math.log1p(max);
+                int grade = Math.min(HEAT_GRADIENT.length - 1,
+                        (int) Math.floor(normalized * HEAT_GRADIENT.length));
+                Block block = world.getBlockAt(entry.getKey().x(), entry.getKey().y(),
+                        entry.getKey().z());
+                BlockPos actual = new BlockPos(block.getX(), block.getY(), block.getZ());
+                originals.putIfAbsent(actual, block.getBlockData());
+                block.setType(HEAT_GRADIENT[grade], false);
+                placed++;
+            }
+            bar.progress(1f - (float) queue.size() / total);
+            bar.name(Component.text("Heatmap: " + (total - queue.size()) + "/" + total));
+            if (queue.isEmpty()) {
+                task.cancel();
+                finishJob(moderator, bar, "Heatmap gerendert: " + total
+                        + " Zellen (max. Intensität " + max + "). /erp route clear zum Entfernen.");
+            }
+        }, 1L, 1L);
+    }
+
     /** Restores every block the route renderer changed. Budgeted. */
     public void clear(Player moderator) {
         List<Map.Entry<BlockPos, BlockData>> entries = new ArrayList<>(originals.entrySet());

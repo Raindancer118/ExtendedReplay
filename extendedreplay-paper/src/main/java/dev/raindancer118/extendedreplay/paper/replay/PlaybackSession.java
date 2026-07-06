@@ -44,6 +44,16 @@ public final class PlaybackSession {
     private final Map<Integer, Integer> appliedEquipmentVersion = new HashMap<>();
     private final int lastTick;
 
+    private record BlockKey(int x, int y, int z) {
+    }
+
+    /** Precomputed state checkpoints for fast backward seeks. */
+    private record Keyframe(int tick, Map<BlockKey, String> blocks,
+                            Map<Integer, PlayerFrame> frames) {
+    }
+
+    private final NavigableMap<Integer, Keyframe> keyframes = new TreeMap<>();
+
     private final List<UUID> viewers = new ArrayList<>();
 
     private double cursor;
@@ -51,9 +61,11 @@ public final class PlaybackSession {
     private double speed = 1.0;
     private boolean paused = true;
     private Integer followedPlayerIndex;
+    private boolean povMode;
 
     public PlaybackSession(UUID sessionId, String sessionName, World world,
-                           ReplayActorRenderer renderer, List<ReplayPacket> packets) {
+                           ReplayActorRenderer renderer, List<ReplayPacket> packets,
+                           int keyframeIntervalTicks) {
         this.sessionId = sessionId;
         this.sessionName = sessionName;
         this.world = world;
@@ -81,6 +93,34 @@ public final class PlaybackSession {
             timeline.computeIfAbsent(tick, k -> new ArrayList<>()).add(packet);
         }
         this.lastTick = maxTick;
+        buildKeyframes(Math.max(200, keyframeIntervalTicks));
+    }
+
+    /**
+     * Walks the timeline once and stores cumulative block/frame state every
+     * {@code interval} ticks, so backward seeks cost O(interval) instead of O(session).
+     */
+    private void buildKeyframes(int interval) {
+        Map<BlockKey, String> blockState = new HashMap<>();
+        Map<Integer, PlayerFrame> frameState = new HashMap<>();
+        int nextKeyframe = interval;
+        for (Map.Entry<Integer, List<ReplayPacket>> entry : timeline.entrySet()) {
+            while (entry.getKey() >= nextKeyframe) {
+                keyframes.put(nextKeyframe - 1, new Keyframe(nextKeyframe - 1,
+                        Map.copyOf(blockState), Map.copyOf(frameState)));
+                nextKeyframe += interval;
+            }
+            for (ReplayPacket packet : entry.getValue()) {
+                if (packet instanceof ReplayPacket.BlockChangePacket p) {
+                    blockState.put(new BlockKey(p.change().x(), p.change().y(), p.change().z()),
+                            p.change().blockData());
+                } else if (packet instanceof ReplayPacket.PlayerFramePacket p) {
+                    frameState.put(p.frame().playerIndex(), p.frame());
+                } else if (packet instanceof ReplayPacket.PlayerQuit p) {
+                    frameState.remove(p.playerIndex());
+                }
+            }
+        }
     }
 
     // --- info ---
@@ -155,15 +195,31 @@ public final class PlaybackSession {
 
     public void follow(Integer playerIndex) {
         this.followedPlayerIndex = playerIndex;
+        this.povMode = false;
+    }
+
+    /** First-person approximation: camera locked to the actor's eye position. */
+    public void pov(Integer playerIndex) {
+        this.followedPlayerIndex = playerIndex;
+        this.povMode = playerIndex != null;
     }
 
     public Integer followedPlayer() {
         return followedPlayerIndex;
     }
 
+    public boolean isPovMode() {
+        return povMode;
+    }
+
+    /** Last applied frame of the player, or null. */
+    public PlayerFrame lastFrame(int playerIndex) {
+        return lastFrames.get(playerIndex);
+    }
+
     /**
-     * Seeks to a tick. Backward seeks restore all modified blocks and rebuild state from
-     * the beginning — correct, and bounded by the number of recorded block changes.
+     * Seeks to a tick. Backward seeks restore all modified blocks, jump to the nearest
+     * precomputed keyframe and replay only the remaining interval.
      */
     public void seek(int targetTick) {
         int target = Math.max(0, Math.min(targetTick, lastTick));
@@ -173,6 +229,16 @@ public final class PlaybackSession {
             lastFrames.clear();
             appliedEquipmentVersion.clear();
             appliedUpTo = -1;
+            Map.Entry<Integer, Keyframe> entry = keyframes.floorEntry(target);
+            if (entry != null) {
+                Keyframe keyframe = entry.getValue();
+                for (Map.Entry<BlockKey, String> block : keyframe.blocks().entrySet()) {
+                    blockApplier.applyRaw(block.getKey().x(), block.getKey().y(),
+                            block.getKey().z(), block.getValue());
+                }
+                lastFrames.putAll(keyframe.frames());
+                appliedUpTo = keyframe.tick();
+            }
         }
         applyRange(appliedUpTo + 1, target);
         cursor = target;

@@ -40,6 +40,8 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
     private HotbarUI hotbar;
     private GuiListener guiListener;
     private ApiImpl api;
+    private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots;
+    private dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager liveMirror;
 
     @Override
     public void onEnable() {
@@ -77,7 +79,7 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         }
         ReplayTransport transport = new WebSocketReplayClient(getLogger(),
                 config.transportHost(), config.transportPort(), config.authToken(),
-                Bukkit.getServer().getName() + ":" + Bukkit.getPort(),
+                "producer:" + Bukkit.getPort(),
                 config.batchIntervalMs(),
                 getDataPath().resolve("spool.erpq"), config.maxSpoolBytes(), metrics);
         producer = new ProducerManager(this, config, transport, metrics);
@@ -111,22 +113,55 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         api = new ApiImpl(producer);
         Bukkit.getServicesManager().register(ExtendedReplayApi.class, api, this,
                 ServicePriority.Normal);
+        ensureSnapshotService();
         getLogger().info("ExtendedReplayApi registered in the ServicesManager.");
     }
 
     private void registerReplayParts() {
         hotbar = new HotbarUI(this);
-        playback = new PlaybackManager(this, config, replayServer, hotbar);
+        snapshots = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService(this,
+                getServer().getWorldContainer().toPath().resolve(config.snapshotPath()));
+        playback = new PlaybackManager(this, config, replayServer, hotbar, snapshots);
         playback.start();
         routes = new RouteManager(this, config, replayServer.storage());
+        liveMirror = new dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager(
+                this, config, replayServer, snapshots, hotbar);
         guiListener = new GuiListener(this, playback, replayServer.storage(), hotbar, routes);
         Bukkit.getPluginManager().registerEvents(guiListener, this);
+        scheduleRetention();
+    }
+
+    /** Applies retention rules shortly after start and then once per day. */
+    private void scheduleRetention() {
+        long dayTicks = 24L * 60 * 60 * 20;
+        Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
+            try {
+                var deleted = replayServer.storage().cleanup(config.retentionDays(),
+                        config.maxStorageBytes());
+                if (!deleted.isEmpty()) {
+                    getLogger().info("Retention: " + deleted.size() + " alte Session(s) gelöscht.");
+                }
+            } catch (Exception e) {
+                getLogger().log(Level.WARNING, "Retention cleanup failed", e);
+            }
+        }, 20L * 60, dayTicks);
+    }
+
+    /** Snapshots are producer-side too: /erp snapshot create on the game server. */
+    private void ensureSnapshotService() {
+        if (snapshots == null) {
+            snapshots = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService(this,
+                    getServer().getWorldContainer().toPath().resolve(config.snapshotPath()));
+        }
     }
 
     @Override
     public void onDisable() {
         if (producer != null) {
             producer.shutdown();
+        }
+        if (liveMirror != null) {
+            liveMirror.stop();
         }
         if (playback != null) {
             playback.shutdown();
@@ -219,5 +254,13 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
 
     public ApiImpl api() {
         return api;
+    }
+
+    public dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots() {
+        return snapshots;
+    }
+
+    public dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager liveMirror() {
+        return liveMirror;
     }
 }

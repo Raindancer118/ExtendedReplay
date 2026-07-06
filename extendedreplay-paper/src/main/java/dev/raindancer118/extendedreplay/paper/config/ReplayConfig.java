@@ -35,6 +35,7 @@ public record ReplayConfig(
         long maxStorageBytes,
         // snapshots
         String snapshotPath,
+        int keyframeIntervalSeconds,
         // renderer
         String preferredRenderer,
         boolean showNametags,
@@ -69,6 +70,7 @@ public record ReplayConfig(
                 c.getInt("storage.max-days", 30),
                 c.getLong("storage.max-gb", 100) * 1024L * 1024L * 1024L,
                 c.getString("snapshots.path", "plugins/ExtendedReplay/snapshots"),
+                c.getInt("snapshots.keyframe-interval-seconds", 300),
                 c.getString("renderer.preferred-player-renderer", "MANNEQUIN"),
                 c.getBoolean("renderer.show-nametags", true),
                 c.getInt("analysis.max-block-changes-per-tick", 1000));

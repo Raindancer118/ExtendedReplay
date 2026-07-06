@@ -32,14 +32,18 @@ public final class WorldStateApplier {
     }
 
     public void apply(BlockChange change) {
+        applyRaw(change.x(), change.y(), change.z(), change.blockData());
+    }
+
+    public void applyRaw(int x, int y, int z, String blockData) {
         BlockData data;
         try {
-            data = Bukkit.createBlockData(change.blockData());
+            data = Bukkit.createBlockData(blockData);
         } catch (IllegalArgumentException e) {
             return; // unknown block data on this version — skip rather than crash playback
         }
-        Block block = world.getBlockAt(change.x(), change.y(), change.z());
-        BlockPos pos = new BlockPos(change.x(), change.y(), change.z());
+        Block block = world.getBlockAt(x, y, z);
+        BlockPos pos = new BlockPos(x, y, z);
         originals.putIfAbsent(pos, block.getBlockData());
         block.setBlockData(data, false);
     }

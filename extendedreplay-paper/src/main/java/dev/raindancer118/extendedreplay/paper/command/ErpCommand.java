@@ -75,9 +75,15 @@ public final class ErpCommand implements TabExecutor {
                 case "inspect" -> inspect(sender, args);
                 case "route" -> route(sender, args);
                 case "verify" -> verify(sender, args);
+                case "reindex" -> reindex(sender, args);
                 case "delete" -> delete(sender, args);
                 case "favorite" -> favorite(sender, args);
                 case "storage" -> storageInfo(sender);
+                case "cleanup" -> cleanup(sender);
+                case "snapshot" -> snapshot(sender, args);
+                case "heatmap" -> heatmap(sender, args);
+                case "pov" -> pov(sender, args);
+                case "cam" -> cam(sender, args);
                 case "gui" -> gui(sender);
                 default -> {
                     send(sender, "Unbekannter Befehl. /erp help");
@@ -168,9 +174,20 @@ public final class ErpCommand implements TabExecutor {
             }
             String name = args.length >= 3 ? args[2]
                     : "session-" + System.currentTimeMillis() / 1000;
+            Map<String, String> metadata = new java.util.HashMap<>();
+            metadata.put("started-by", player.getName());
+            if (args.length >= 4) {
+                if (!plugin.snapshots().exists(args[3])) {
+                    send(sender, "Snapshot '" + args[3] + "' existiert nicht — "
+                            + "erst /erp snapshot create " + args[3]);
+                    return true;
+                }
+                metadata.put("snapshot", args[3]);
+            }
             ActiveSession session = plugin.producer().startSession(name, null,
-                    player.getWorld(), null, Map.of("started-by", player.getName()));
-            send(sender, "Aufnahme gestartet: " + name + " (" + session.sessionId() + ")");
+                    player.getWorld(), null, metadata);
+            send(sender, "Aufnahme gestartet: " + name + " (" + session.sessionId() + ")"
+                    + (args.length >= 4 ? " · Snapshot: " + args[3] : ""));
             return true;
         }
         if (args.length >= 2 && args[1].equalsIgnoreCase("stop")) {
@@ -320,7 +337,15 @@ public final class ErpCommand implements TabExecutor {
     }
 
     private boolean close(CommandSender sender) {
-        if (sender instanceof Player player && plugin.playback() != null) {
+        if (!(sender instanceof Player player)) {
+            return true;
+        }
+        if (plugin.liveMirror() != null && plugin.liveMirror().isViewer(player)) {
+            plugin.liveMirror().leave(player);
+            send(sender, "Live-Mirror verlassen.");
+            return true;
+        }
+        if (plugin.playback() != null) {
             plugin.playback().detachViewer(player);
             send(sender, "Playback geschlossen.");
         }
@@ -336,19 +361,7 @@ public final class ErpCommand implements TabExecutor {
             send(sender, "Keine laufende Live-Session.");
             return true;
         }
-        send(sender, "Öffne Live-Session (nachlaufende Wiedergabe)…");
-        plugin.playback().open(liveId, player).whenComplete((session, error) -> {
-            if (error == null && session != null) {
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    session.seek(Math.max(0, session.lastTickOfSession()
-                            - plugin.config().liveDelaySeconds() * 20));
-                    session.play();
-                });
-            } else if (error != null) {
-                Bukkit.getScheduler().runTask(plugin, () ->
-                        send(sender, "Fehler: " + error.getMessage()));
-            }
-        });
+        plugin.liveMirror().join(player, liveId);
         return true;
     }
 
@@ -634,7 +647,246 @@ public final class ErpCommand implements TabExecutor {
         return true;
     }
 
+    // --- snapshots ---
+
+    private boolean snapshot(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("extendedreplay.snapshot")) {
+            return noPermission(sender);
+        }
+        if (plugin.snapshots() == null) {
+            send(sender, "Snapshots sind in Rolle " + plugin.role() + " nicht verfügbar.");
+            return true;
+        }
+        if (args.length < 2) {
+            send(sender, "/erp snapshot create <name> <radius|x1 y1 z1 x2 y2 z2> | list | info <n> | verify <n> | delete <n>");
+            return true;
+        }
+        var snapshots = plugin.snapshots();
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "create" -> {
+                if (!(sender instanceof Player player)) {
+                    send(sender, "Nur in-game.");
+                    return true;
+                }
+                if (args.length < 4) {
+                    send(sender, "/erp snapshot create <name> <radius> — oder — "
+                            + "/erp snapshot create <name> <x1> <y1> <z1> <x2> <y2> <z2>");
+                    return true;
+                }
+                String name = args[2];
+                int x1;
+                int y1;
+                int z1;
+                int x2;
+                int y2;
+                int z2;
+                if (args.length >= 9) {
+                    x1 = Integer.parseInt(args[3]);
+                    y1 = Integer.parseInt(args[4]);
+                    z1 = Integer.parseInt(args[5]);
+                    x2 = Integer.parseInt(args[6]);
+                    y2 = Integer.parseInt(args[7]);
+                    z2 = Integer.parseInt(args[8]);
+                } else {
+                    int radius = Integer.parseInt(args[3]);
+                    var center = player.getLocation();
+                    x1 = center.getBlockX() - radius;
+                    z1 = center.getBlockZ() - radius;
+                    x2 = center.getBlockX() + radius;
+                    z2 = center.getBlockZ() + radius;
+                    y1 = player.getWorld().getMinHeight();
+                    y2 = player.getWorld().getMaxHeight() - 1;
+                }
+                send(sender, "Erstelle Snapshot '" + name + "'…");
+                snapshots.create(name, player.getWorld(), x1, y1, z1, x2, y2, z2, player)
+                        .whenComplete((sha, error) -> {
+                            if (error != null) {
+                                send(sender, "Snapshot fehlgeschlagen: " + error.getMessage());
+                            } else {
+                                send(sender, "✔ Snapshot '" + name + "' gespeichert (sha256 "
+                                        + sha.substring(0, 16) + "…). Nutzung: /erp record start <session> " + name);
+                            }
+                        });
+            }
+            case "list" -> {
+                try {
+                    var list = snapshots.list();
+                    send(sender, list.isEmpty() ? "Keine Snapshots."
+                            : "Snapshots: " + String.join(", ", list));
+                } catch (Exception e) {
+                    send(sender, "Fehler: " + e.getMessage());
+                }
+            }
+            case "info", "verify" -> {
+                if (args.length < 3) {
+                    send(sender, "/erp snapshot " + args[1] + " <name>");
+                    return true;
+                }
+                Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                    try {
+                        send(sender, snapshots.describe(args[2]));
+                        send(sender, "✔ Datei lesbar, Header und Palette intakt.");
+                    } catch (Exception e) {
+                        send(sender, "✘ Snapshot defekt oder fehlt: " + e.getMessage());
+                    }
+                });
+            }
+            case "delete" -> {
+                if (args.length < 3) {
+                    send(sender, "/erp snapshot delete <name>");
+                    return true;
+                }
+                if (args.length < 4 || !args[3].equalsIgnoreCase("confirm")) {
+                    send(sender, "Bestätigen: /erp snapshot delete " + args[2] + " confirm");
+                    return true;
+                }
+                try {
+                    snapshots.delete(args[2]);
+                    send(sender, "Snapshot gelöscht.");
+                } catch (Exception e) {
+                    send(sender, "Fehler: " + e.getMessage());
+                }
+            }
+            default -> send(sender, "/erp snapshot create|list|info|verify|delete");
+        }
+        return true;
+    }
+
+    // --- heatmaps ---
+
+    private boolean heatmap(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player)) {
+            return true;
+        }
+        if (!sender.hasPermission("extendedreplay.heatmap")) {
+            return noPermission(sender);
+        }
+        if (args.length < 2) {
+            send(sender, "/erp heatmap movement|kills|deaths|loot");
+            return true;
+        }
+        return withPlayback(sender, session -> {
+            switch (args[1].toLowerCase(Locale.ROOT)) {
+                case "movement" -> plugin.routes().renderMovementHeatmap(player, session);
+                case "kills" -> plugin.routes().renderEventHeatmap(player, session, "KILL");
+                case "deaths" -> plugin.routes().renderEventHeatmap(player, session, "DEATH");
+                case "loot" -> plugin.routes().renderEventHeatmap(player, session, "LOOT");
+                default -> send(sender, "/erp heatmap movement|kills|deaths|loot");
+            }
+        });
+    }
+
+    // --- camera ---
+
+    private boolean pov(CommandSender sender, String[] args) {
+        return withPlayback(sender, session -> {
+            if (args.length < 2) {
+                session.pov(null);
+                send(sender, "POV beendet.");
+                return;
+            }
+            Integer index = session.playerIndexByName(args[1]);
+            if (index == null) {
+                send(sender, "Spieler nicht in der Aufnahme: " + args[1]);
+                return;
+            }
+            session.pov(index);
+            send(sender, "POV: " + args[1] + " (beenden: /erp pov)");
+        });
+    }
+
+    private boolean cam(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player) || plugin.playback() == null) {
+            return true;
+        }
+        if (args.length < 2) {
+            send(sender, "/erp cam save|goto|list|delete <name>");
+            return true;
+        }
+        Map<String, org.bukkit.Location> cameras = plugin.playback().camerasOf(player);
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "save" -> {
+                if (args.length < 3) {
+                    send(sender, "/erp cam save <name>");
+                    return true;
+                }
+                cameras.put(args[2], player.getLocation().clone());
+                send(sender, "Kamera '" + args[2] + "' gespeichert.");
+            }
+            case "goto" -> {
+                if (args.length < 3 || !cameras.containsKey(args[2])) {
+                    send(sender, "Unbekannte Kamera. Gespeichert: " + cameras.keySet());
+                    return true;
+                }
+                player.teleport(cameras.get(args[2]));
+            }
+            case "list" -> send(sender, cameras.isEmpty() ? "Keine Kameras gespeichert."
+                    : "Kameras: " + String.join(", ", cameras.keySet()));
+            case "delete" -> {
+                if (args.length >= 3 && cameras.remove(args[2]) != null) {
+                    send(sender, "Kamera gelöscht.");
+                } else {
+                    send(sender, "Unbekannte Kamera.");
+                }
+            }
+            default -> send(sender, "/erp cam save|goto|list|delete <name>");
+        }
+        return true;
+    }
+
     // --- admin / storage ---
+
+    private boolean reindex(CommandSender sender, String[] args) {
+        if (requireReplay(sender) || args.length < 2) {
+            return true;
+        }
+        if (!sender.hasPermission("extendedreplay.storage")) {
+            return noPermission(sender);
+        }
+        UUID id;
+        try {
+            id = UUID.fromString(args[1]); // index may be gone: name lookup unavailable
+        } catch (IllegalArgumentException e) {
+            UUID resolved = resolveSessionId(sender, args[1]);
+            if (resolved == null) {
+                return true;
+            }
+            id = resolved;
+        }
+        UUID finalId = id;
+        send(sender, "Reindiziere aus Segment-Dateien…");
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                int packets = plugin.replayServer().storage().reindex(finalId);
+                send(sender, "✔ Reindex fertig: " + packets + " Pakete indiziert.");
+            } catch (Exception e) {
+                send(sender, "✘ Reindex fehlgeschlagen: " + e.getMessage());
+            }
+        });
+        return true;
+    }
+
+    private boolean cleanup(CommandSender sender) {
+        if (requireReplay(sender)) {
+            return true;
+        }
+        if (!sender.hasPermission("extendedreplay.storage")) {
+            return noPermission(sender);
+        }
+        send(sender, "Wende Retention an (max-days=" + plugin.config().retentionDays()
+                + ", max-gb=" + plugin.config().maxStorageBytes() / (1024 * 1024 * 1024) + ")…");
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                var deleted = plugin.replayServer().storage().cleanup(
+                        plugin.config().retentionDays(), plugin.config().maxStorageBytes());
+                send(sender, deleted.isEmpty() ? "Nichts zu löschen."
+                        : deleted.size() + " Session(s) gelöscht (Favoriten verschont).");
+            } catch (Exception e) {
+                send(sender, "Fehler: " + e.getMessage());
+            }
+        });
+        return true;
+    }
 
     private boolean verify(CommandSender sender, String[] args) {
         if (requireReplay(sender) || args.length < 2) {
@@ -823,11 +1075,15 @@ public final class ErpCommand implements TabExecutor {
             if (plugin.role().records()) {
                 subs.addAll(List.of("record", "bookmark"));
             }
+            if (plugin.role().records() || plugin.role().playsBack()) {
+                subs.add("snapshot");
+            }
             if (plugin.role().playsBack()) {
                 subs.addAll(List.of("sessions", "session", "play", "pause", "resume", "speed",
                         "jump", "rewind", "forward", "close", "live", "events", "bookmarks",
-                        "scene", "follow", "freecam", "inventory", "container", "inspect",
-                        "route", "verify", "delete", "favorite", "storage", "gui", "test"));
+                        "scene", "follow", "freecam", "pov", "cam", "inventory", "container",
+                        "inspect", "route", "heatmap", "verify", "reindex", "delete",
+                        "favorite", "storage", "cleanup", "gui", "test"));
             }
             return subs.stream()
                     .filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT)))
@@ -840,6 +1096,9 @@ public final class ErpCommand implements TabExecutor {
                 case "scene" -> List.of("create", "list", "open", "delete");
                 case "speed" -> List.of("0.25", "0.5", "1", "2", "4", "8");
                 case "inspect" -> List.of("player", "chest");
+                case "snapshot" -> List.of("create", "list", "info", "verify", "delete");
+                case "heatmap" -> List.of("movement", "kills", "deaths", "loot");
+                case "cam" -> List.of("save", "goto", "list", "delete");
                 default -> List.of();
             };
         }

@@ -27,15 +27,15 @@ import java.util.logging.Level;
  */
 public final class GuiListener implements Listener {
 
-    private final Plugin plugin;
+    private final dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin plugin;
     private final PlaybackManager playback;
     private final ReplayStorage storage;
     private final HotbarUI hotbar;
     private final dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes;
     private static final double[] SPEED_STEPS = {0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
 
-    public GuiListener(Plugin plugin, PlaybackManager playback, ReplayStorage storage,
-                       HotbarUI hotbar,
+    public GuiListener(dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin plugin,
+                       PlaybackManager playback, ReplayStorage storage, HotbarUI hotbar,
                        dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes) {
         this.plugin = plugin;
         this.playback = playback;
@@ -111,6 +111,16 @@ public final class GuiListener implements Listener {
         Player player = event.getPlayer();
         PlaybackSession session = playback.sessionOf(player).orElse(null);
         if (session == null) {
+            // live mirror viewers get a reduced action set
+            var live = plugin.liveMirror();
+            if (live != null && live.isViewer(player)) {
+                switch (action) {
+                    case EXIT -> live.leave(player);
+                    case CAMERA -> toggleFreecam(player);
+                    default -> player.sendMessage(Component.text(
+                            "Im Live-Mirror verfügbar: Freecam (Auge), Verlassen (Barriere)."));
+                }
+            }
             return;
         }
         switch (action) {
@@ -204,5 +214,9 @@ public final class GuiListener implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         playback.detachViewer(event.getPlayer());
+        var live = plugin.liveMirror();
+        if (live != null) {
+            live.leave(event.getPlayer());
+        }
     }
 }

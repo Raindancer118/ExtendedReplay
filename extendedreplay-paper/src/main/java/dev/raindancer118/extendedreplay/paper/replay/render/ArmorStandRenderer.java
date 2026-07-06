@@ -88,7 +88,7 @@ public final class ArmorStandRenderer implements ReplayActorRenderer {
             if (start <= 0 || end <= start) {
                 return null;
             }
-            return new URL(json.substring(start, end));
+            return java.net.URI.create(json.substring(start, end)).toURL();
         } catch (IllegalArgumentException | MalformedURLException e) {
             return null;
         }

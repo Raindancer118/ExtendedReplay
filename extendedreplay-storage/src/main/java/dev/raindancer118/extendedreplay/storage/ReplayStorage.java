@@ -293,6 +293,111 @@ public final class ReplayStorage implements AutoCloseable {
         return problems;
     }
 
+    /**
+     * Rebuilds the metadata index of a session from its segment files on disk. Used by
+     * /erp reindex after index corruption or a restore from backup. Returns the number
+     * of packets re-indexed.
+     */
+    public int reindex(UUID sessionId) throws SQLException, IOException {
+        Path directory = sessionDirectory(sessionId);
+        if (!Files.isDirectory(directory)) {
+            throw new IOException("No segment directory for session " + sessionId);
+        }
+        List<Path> files;
+        try (Stream<Path> stream = Files.list(directory)) {
+            files = stream.filter(p -> p.getFileName().toString().endsWith(".erps"))
+                    .sorted()
+                    .toList();
+        }
+        if (files.isEmpty()) {
+            throw new IOException("No segment files for session " + sessionId);
+        }
+        database.deleteSession(sessionId);
+
+        int packets = 0;
+        Map<Integer, UUID> indexToUuid = new HashMap<>();
+        long startedAt = 0;
+        long endedAt = 0;
+        int lastTick = 0;
+        String name = sessionId.toString();
+        String externalKey = null;
+        String worldName = "?";
+        String endReason = null;
+        String snapshotName = null;
+        int formatVersion = FormatConstants.FORMAT_VERSION;
+
+        for (Path file : files) {
+            SegmentReader.SegmentContent content = SegmentReader.read(file);
+            database.insertSegment(content.info());
+            for (ReplayPacket packet : content.packets()) {
+                packets++;
+                lastTick = Math.max(lastTick, packet.tick());
+                switch (packet) {
+                    case ReplayPacket.SessionStart p -> {
+                        name = p.name();
+                        externalKey = p.externalKey();
+                        worldName = p.worldName();
+                        startedAt = p.startedAtMillis();
+                        formatVersion = p.formatVersion();
+                    }
+                    case ReplayPacket.SessionEnd p -> {
+                        endReason = p.reason();
+                        endedAt = startedAt + (long) p.tick() * 50;
+                    }
+                    case ReplayPacket.SnapshotReference p -> snapshotName = p.snapshotName();
+                    case ReplayPacket.PlayerProfile p -> {
+                        database.insertPlayer(sessionId, p.profile());
+                        indexToUuid.put(p.profile().playerIndex(), p.profile().uuid());
+                    }
+                    case ReplayPacket.TimelineEventPacket p -> {
+                        var e = p.event();
+                        database.insertEvent(sessionId, e.tick(), e.eventType(), e.category(),
+                                indexToUuid.get(e.actorPlayerIndex()),
+                                indexToUuid.get(e.targetPlayerIndex()),
+                                e.worldName(), e.x(), e.y(), e.z(), e.metadata());
+                    }
+                    default -> {
+                        // frames/deltas need no index entry
+                    }
+                }
+            }
+        }
+        database.insertSession(new SessionRecord(sessionId, name, externalKey, worldName,
+                startedAt, endedAt > 0 ? endedAt : System.currentTimeMillis(), lastTick,
+                endReason != null ? endReason : "REINDEXED", snapshotName, false, formatVersion));
+        return packets;
+    }
+
+    /**
+     * Applies retention rules: deletes finished, non-favorite sessions older than
+     * {@code maxAgeDays}, then deletes oldest non-favorite sessions while total storage
+     * exceeds {@code maxBytes}. Returns the deleted session ids.
+     */
+    public List<UUID> cleanup(int maxAgeDays, long maxBytes) throws SQLException, IOException {
+        List<UUID> deleted = new ArrayList<>();
+        long cutoff = System.currentTimeMillis() - maxAgeDays * 24L * 60 * 60 * 1000;
+        List<SessionRecord> sessions = database.listSessions(10_000);
+        for (SessionRecord session : sessions) {
+            if (session.isFinished() && !session.favorite() && session.startedAtMillis() < cutoff) {
+                deleteSessionData(session.sessionId());
+                deleted.add(session.sessionId());
+            }
+        }
+        // oldest first for the size-based pass
+        List<SessionRecord> remaining = new ArrayList<>(database.listSessions(10_000));
+        remaining.sort(Comparator.comparingLong(SessionRecord::startedAtMillis));
+        for (SessionRecord session : remaining) {
+            if (storageBytes() <= maxBytes) {
+                break;
+            }
+            if (session.isFinished() && !session.favorite()) {
+                deleteSessionData(session.sessionId());
+                deleted.add(session.sessionId());
+            }
+        }
+        return deleted;
+    }
+
     /** Deletes session data from disk and index. */
     public void deleteSessionData(UUID sessionId) throws SQLException, IOException {
         database.deleteSession(sessionId);

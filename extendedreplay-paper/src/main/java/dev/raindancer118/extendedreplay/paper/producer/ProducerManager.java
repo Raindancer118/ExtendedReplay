@@ -119,6 +119,10 @@ public final class ProducerManager {
                 hasBounds, metadata == null ? Map.of() : metadata));
 
         recordEvent(session, "SESSION_START", "SESSION", null, null, null, true, Map.of());
+        if (metadata != null && metadata.containsKey("snapshot")) {
+            offer(new ReplayPacket.SnapshotReference(session.sessionId(),
+                    metadata.get("snapshot"), metadata.get("snapshot-sha256")));
+        }
         for (Player player : world.getPlayers()) {
             registerPlayer(session, player);
         }

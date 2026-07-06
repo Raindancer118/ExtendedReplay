@@ -6,4 +6,5 @@ include(
     "extendedreplay-storage",
     "extendedreplay-transport",
     "extendedreplay-paper",
+    "extendedreplay-integration-example",
 )

@@ -78,11 +78,12 @@ One plugin, four roles — set `extendedreplay.server-role` in `config.yml`:
 
 ```
 extendedreplay/
-├── extendedreplay-api        Public API (ExtendedReplayApi via Bukkit ServicesManager)
-├── extendedreplay-core       Replay model, binary protocol, queues, metrics — pure Java
-├── extendedreplay-storage    zstd segment files + SQLite metadata index
-├── extendedreplay-transport  WebSocket client/server, batching, spooling, loopback
-└── extendedreplay-paper      The actual Paper plugin: capture, playback, GUI, commands
+├── extendedreplay-api                  Public API (ExtendedReplayApi via ServicesManager)
+├── extendedreplay-core                 Replay model, binary protocol, queues, metrics — pure Java
+├── extendedreplay-storage              zstd segment files + SQLite index + arena snapshots
+├── extendedreplay-transport            WebSocket client/server, batching, spooling, loopback
+├── extendedreplay-paper                The actual Paper plugin: capture, playback, GUI, commands
+└── extendedreplay-integration-example  Reference integration for minigame plugins
 ```
 
 The dependency direction is strict: `paper → {api, core, storage, transport}` and
@@ -92,13 +93,16 @@ The dependency direction is strict: `paper → {api, core, storage, transport}` 
 
 A replay session is **not** a series of world dumps. It consists of:
 
-1. a reference to a **precomputed arena snapshot** (the world as it was at match start),
+1. a reference to a **precomputed arena snapshot** (the world as it was at match start —
+   palette-compressed `.erpa` files, created in per-tick budgets, applied on the replay
+   server before playback),
 2. a **20 Hz player frame stream** (compact primitives — no ItemStacks, no NBT, no JSON),
 3. **event-based deltas**: block changes, inventory/container snapshots (only when their
    content hash actually changed), equipment changes (versioned, referenced from frames),
    entity/projectile/item events,
 4. a **timeline of discrete events** (kills, deaths, chat, custom events, bookmarks),
-5. replay-server-generated **keyframes** for fast seeking.
+5. **keyframes** built when a playback session opens, so backward seeks replay only the
+   interval since the last checkpoint instead of the whole session.
 
 Under load, the pipeline degrades gracefully: cosmetic data (particle-level frames,
 item movement) is dropped first and counted; critical events (kills, inventories, block
@@ -168,16 +172,19 @@ transport:
 
 ```
 # on the game server (or via the API from your minigame plugin)
-/erp record start match-42
+/erp snapshot create arena-v1 200        # once: freeze the arena (radius 200)
+/erp record start match-42 arena-v1      # record, referencing the snapshot
 ... play the match ...
 /erp record stop
 
-# on the replay server
+# on the replay server (copy the .erpa file into its snapshots folder once)
+/erp live                  # watch the running match, delayed live mirror
 /erp sessions              # list stored sessions
-/erp play <sessionId>      # open a playback session
+/erp play <sessionId>      # open a playback session (applies the arena snapshot)
 /erp events                # browse & jump to kills, chests, custom events
 /erp inventory <player>    # inspect an inventory at the current replay time
 /erp route render <player> # draw a player's path
+/erp heatmap kills         # intensity-graded kill heatmap
 ```
 
 ---
@@ -252,14 +259,25 @@ session.end(ReplaySessionEndReason.COMPLETED);
 | Segment storage + SQLite index (`extendedreplay-storage`) | ✅ implemented & unit-tested |
 | WebSocket transport + disk spooling (`extendedreplay-transport`) | ✅ implemented & integration-tested |
 | Paper plugin: 20 Hz capture, playback, event browser, inspection, hotbar UI | ✅ implemented, boots & self-tests on Paper 1.21.10 |
+| Playback keyframes (fast backward seeking) | ✅ implemented |
+| Streaming live mirror with configurable delay (`/erp live`) | ✅ implemented |
+| Arena snapshots — create/apply/verify, palette+zstd format (`/erp snapshot …`) | ✅ implemented & unit-tested |
 | Route rendering (carpet/glass/concrete/particles) | ✅ implemented |
-| Live view | ⚠️ trailing playback of the live session (`/erp live`); true streaming mirror in development |
-| Arena snapshots (`/erp snapshot …`) | 🚧 in development |
-| Heatmaps | 🚧 in development |
+| Heatmaps — movement/kills/deaths/loot, log-scaled gradient | ✅ implemented |
+| Camera slots & POV mode (`/erp cam …`, `/erp pov <player>`) | ✅ implemented |
+| Retention & integrity — auto-cleanup, `/erp cleanup`, `/erp verify`, `/erp reindex` | ✅ implemented & unit-tested |
+| Minigame integration example (`extendedreplay-integration-example`) | ✅ compiles against the public API |
 
 `/erp test` runs an end-to-end self-test on any REPLAY/STANDALONE server: it records a
 synthetic session through the real pipeline into segment files, reads it back and
 verifies every checksum.
+
+**Honest caveats:** the storage, transport, protocol and snapshot layers are covered by
+automated tests; the in-game layer (capture listeners, playback, GUIs, live mirror) is
+verified by compilation against the Paper 1.21.10 API plus a real-server boot and
+pipeline self-test — a full multiplayer match recording has not been part of CI. POV is
+an approximation (camera lock to the actor's eye line), not a client-side first-person
+reproduction.
 
 **Design principles** (non-negotiable):
 
