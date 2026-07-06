@@ -1,0 +1,75 @@
+name: ExtendedReplay
+version: "${version}"
+main: dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin
+api-version: "1.21"
+author: Raindancer118
+description: Server-side 3D replay, live mirror, playback and analysis system.
+website: https://github.com/Raindancer118/ExtendedReplay
+
+libraries:
+  - org.xerial:sqlite-jdbc:${sqliteJdbcVersion}
+  - com.github.luben:zstd-jni:${zstdJniVersion}
+  - org.java-websocket:Java-WebSocket:${javaWebsocketVersion}
+
+commands:
+  erp:
+    description: ExtendedReplay main command
+    aliases: [extendedreplay, replayx]
+    permission: extendedreplay.use
+
+permissions:
+  extendedreplay.use:
+    description: Base permission for /erp
+    default: op
+  extendedreplay.viewer:
+    description: Watch replays and live mirror
+    default: op
+  extendedreplay.moderator:
+    description: Full replay control incl. events and inspection
+    default: op
+    children:
+      extendedreplay.use: true
+      extendedreplay.viewer: true
+      extendedreplay.playback: true
+      extendedreplay.events: true
+      extendedreplay.inspect: true
+      extendedreplay.inventory.view: true
+      extendedreplay.container.view: true
+  extendedreplay.director:
+    description: Scenes, cameras, route rendering
+    default: op
+    children:
+      extendedreplay.moderator: true
+      extendedreplay.route.render: true
+      extendedreplay.heatmap: true
+  extendedreplay.admin:
+    description: Everything incl. storage and snapshots
+    default: op
+    children:
+      extendedreplay.director: true
+      extendedreplay.record: true
+      extendedreplay.snapshot: true
+      extendedreplay.storage: true
+      extendedreplay.api: true
+  extendedreplay.record:
+    default: op
+  extendedreplay.playback:
+    default: op
+  extendedreplay.events:
+    default: op
+  extendedreplay.inspect:
+    default: op
+  extendedreplay.inventory.view:
+    default: op
+  extendedreplay.container.view:
+    default: op
+  extendedreplay.route.render:
+    default: op
+  extendedreplay.heatmap:
+    default: op
+  extendedreplay.snapshot:
+    default: op
+  extendedreplay.storage:
+    default: op
+  extendedreplay.api:
+    default: op

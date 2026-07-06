@@ -10,13 +10,14 @@ dependencies {
     compileOnly("org.java-websocket:Java-WebSocket:${property("javaWebsocketVersion")}")
 }
 
+val props = mapOf(
+    "version" to project.version.toString(),
+    "sqliteJdbcVersion" to project.property("sqliteJdbcVersion").toString(),
+    "zstdJniVersion" to project.property("zstdJniVersion").toString(),
+    "javaWebsocketVersion" to project.property("javaWebsocketVersion").toString(),
+)
+
 tasks.processResources {
-    val props = mapOf(
-        "version" to project.version.toString(),
-        "sqliteJdbcVersion" to property("sqliteJdbcVersion").toString(),
-        "zstdJniVersion" to property("zstdJniVersion").toString(),
-        "javaWebsocketVersion" to property("javaWebsocketVersion").toString(),
-    )
     inputs.properties(props)
     filesMatching("plugin.yml") {
         expand(props)
@@ -28,7 +29,11 @@ tasks.processResources {
 tasks.jar {
     archiveBaseName.set("ExtendedReplay")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    val ownModules = configurations.runtimeClasspath.get()
-        .filter { it.name.startsWith("extendedreplay-") }
-    from(ownModules.map { zipTree(it) })
+    listOf(":extendedreplay-api", ":extendedreplay-core",
+        ":extendedreplay-storage", ":extendedreplay-transport").forEach { module ->
+        val sourceSets = project(module).extensions
+            .getByType(SourceSetContainer::class.java)
+        from(sourceSets.named("main").get().output)
+        dependsOn("$module:classes")
+    }
 }

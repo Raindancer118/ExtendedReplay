@@ -1,0 +1,57 @@
+# ExtendedReplay configuration
+#
+# server-role:
+#   PRODUCER   - real game server: captures and streams, never plays back
+#   REPLAY     - replay server: receives, stores, mirrors and plays back
+#   STANDALONE - records and plays back locally (testing)
+#   DISABLED   - plugin loads but does nothing
+extendedreplay:
+  server-role: DISABLED
+
+producer:
+  enabled: true
+  capture-inventories: true
+  capture-containers: true
+  capture-block-changes: true
+  capture-entities: true
+  capture-projectiles: true
+  capture-items: true
+  capture-chat: true
+  capture-world-border: true
+  capture-weather-time: true
+
+performance:
+  # soft cap of the in-memory packet queue; cosmetic packets are dropped above it
+  max-queue-size: 100000
+
+transport:
+  # producer side: where the replay server lives
+  host: 127.0.0.1
+  port: 8787
+  auth-token: "change-me"
+  batch-interval-ms: 50
+  # disk spool while the replay server is unreachable
+  max-spool-size-mb: 1024
+
+replay-server:
+  bind-host: 0.0.0.0
+  bind-port: 8787
+  live-delay-seconds: 2
+  playback-world-prefix: erp_playback
+
+storage:
+  path: plugins/ExtendedReplay/replays
+  segment-length-seconds: 30
+  max-days: 30
+  max-gb: 100
+
+snapshots:
+  path: plugins/ExtendedReplay/snapshots
+
+renderer:
+  # MANNEQUIN (native, preferred) or ARMOR_STAND (fallback)
+  preferred-player-renderer: MANNEQUIN
+  show-nametags: true
+
+analysis:
+  max-block-changes-per-tick: 1000

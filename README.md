@@ -245,17 +245,21 @@ session.end(ReplaySessionEndReason.COMPLETED);
 
 ## 📊 Project Status
 
-The foundation is built and tested; the Paper plugin layer is under active development.
-
 | Component | State |
 |-----------|-------|
-| Public API (`extendedreplay-api`) | ✅ implemented |
+| Public API (`extendedreplay-api`) | ✅ implemented, registered via ServicesManager |
 | Binary protocol + replay model (`extendedreplay-core`) | ✅ implemented & unit-tested |
 | Segment storage + SQLite index (`extendedreplay-storage`) | ✅ implemented & unit-tested |
 | WebSocket transport + disk spooling (`extendedreplay-transport`) | ✅ implemented & integration-tested |
-| Paper plugin: capture, playback, GUI, commands (`extendedreplay-paper`) | 🚧 in development |
-| Route rendering & heatmaps | 🚧 in development |
-| Arena snapshots | 🚧 in development |
+| Paper plugin: 20 Hz capture, playback, event browser, inspection, hotbar UI | ✅ implemented, boots & self-tests on Paper 1.21.10 |
+| Route rendering (carpet/glass/concrete/particles) | ✅ implemented |
+| Live view | ⚠️ trailing playback of the live session (`/erp live`); true streaming mirror in development |
+| Arena snapshots (`/erp snapshot …`) | 🚧 in development |
+| Heatmaps | 🚧 in development |
+
+`/erp test` runs an end-to-end self-test on any REPLAY/STANDALONE server: it records a
+synthetic session through the real pipeline into segment files, reads it back and
+verifies every checksum.
 
 **Design principles** (non-negotiable):
 
