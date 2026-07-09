@@ -68,7 +68,8 @@ public final class ReplayStorage implements AutoCloseable {
             case ReplayPacket.SessionStart p -> {
                 database.insertSession(new SessionRecord(p.sessionId(), p.name(), p.externalKey(),
                         p.worldName(), p.startedAtMillis(), 0, 0, null, null, false,
-                        p.formatVersion()));
+                        p.formatVersion(), parseWorldSeed(p.metadata()),
+                        p.metadata() != null ? p.metadata().get("world-environment") : null));
                 writers.put(p.sessionId(),
                         new SegmentWriter(sessionDirectory(p.sessionId()), p.sessionId(),
                                 segmentLengthSeconds));
@@ -165,6 +166,22 @@ public final class ReplayStorage implements AutoCloseable {
             } catch (IOException | SQLException e) {
                 // best effort during shutdown
             }
+        }
+    }
+
+    /** Defensively parses the {@code world-seed} metadata entry; null when absent or malformed. */
+    private static Long parseWorldSeed(Map<String, String> metadata) {
+        if (metadata == null) {
+            return null;
+        }
+        String raw = metadata.get("world-seed");
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -325,6 +342,8 @@ public final class ReplayStorage implements AutoCloseable {
         String endReason = null;
         String snapshotName = null;
         int formatVersion = FormatConstants.FORMAT_VERSION;
+        Long worldSeed = null;
+        String worldEnvironment = null;
 
         for (Path file : files) {
             SegmentReader.SegmentContent content = SegmentReader.read(file);
@@ -339,6 +358,9 @@ public final class ReplayStorage implements AutoCloseable {
                         worldName = p.worldName();
                         startedAt = p.startedAtMillis();
                         formatVersion = p.formatVersion();
+                        worldSeed = parseWorldSeed(p.metadata());
+                        worldEnvironment = p.metadata() != null
+                                ? p.metadata().get("world-environment") : null;
                     }
                     case ReplayPacket.SessionEnd p -> {
                         endReason = p.reason();
@@ -364,7 +386,8 @@ public final class ReplayStorage implements AutoCloseable {
         }
         database.insertSession(new SessionRecord(sessionId, name, externalKey, worldName,
                 startedAt, endedAt > 0 ? endedAt : System.currentTimeMillis(), lastTick,
-                endReason != null ? endReason : "REINDEXED", snapshotName, false, formatVersion));
+                endReason != null ? endReason : "REINDEXED", snapshotName, false, formatVersion,
+                worldSeed, worldEnvironment));
         return packets;
     }
 

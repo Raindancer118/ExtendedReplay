@@ -39,6 +39,7 @@ public final class MetadataDatabase implements AutoCloseable {
             statement.execute("PRAGMA synchronous=NORMAL");
         }
         createSchema();
+        migrateSchema();
     }
 
     private void createSchema() throws SQLException {
@@ -55,7 +56,9 @@ public final class MetadataDatabase implements AutoCloseable {
                       end_reason TEXT,
                       snapshot_name TEXT,
                       favorite INTEGER NOT NULL DEFAULT 0,
-                      format_version INTEGER NOT NULL
+                      format_version INTEGER NOT NULL,
+                      world_seed INTEGER,
+                      world_environment TEXT
                     )""");
             s.execute("""
                     CREATE TABLE IF NOT EXISTS players (
@@ -117,14 +120,56 @@ public final class MetadataDatabase implements AutoCloseable {
         }
     }
 
+    /**
+     * Adds columns to existing databases created before a given column existed. New
+     * databases already have the column from {@link #createSchema()}; the
+     * {@code PRAGMA table_info} check makes each addition a no-op when it already ran.
+     */
+    private void migrateSchema() throws SQLException {
+        addColumnIfMissing("sessions", "world_seed", "INTEGER");
+        addColumnIfMissing("sessions", "world_environment", "TEXT");
+    }
+
+    private void addColumnIfMissing(String table, String column, String type) throws SQLException {
+        try (Statement s = connection.createStatement();
+             ResultSet rs = s.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    return;
+                }
+            }
+        }
+        try (Statement s = connection.createStatement()) {
+            s.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+        }
+    }
+
     // --- sessions ---
+
+    /**
+     * Base SELECT for session rows: {@code last_tick} is the effective value, i.e. the max
+     * of the persisted {@code sessions.last_tick} (only written on session end) and the
+     * highest {@code end_tick} already flushed to the segments table. This keeps live
+     * (not-yet-ended) sessions from reporting a 0 tick / 0:00 duration in listings.
+     */
+    private static final String SESSION_SELECT = """
+            SELECT s.session_id, s.name, s.external_key, s.world_name, s.started_at, s.ended_at,
+                   MAX(s.last_tick, COALESCE(seg.max_end_tick, 0)) AS last_tick,
+                   s.end_reason, s.snapshot_name, s.favorite, s.format_version,
+                   s.world_seed, s.world_environment
+            FROM sessions s
+            LEFT JOIN (
+              SELECT session_id, MAX(end_tick) AS max_end_tick FROM segments GROUP BY session_id
+            ) seg ON seg.session_id = s.session_id
+            """;
 
     public synchronized void insertSession(SessionRecord record) throws SQLException {
         try (PreparedStatement p = connection.prepareStatement("""
                 INSERT OR REPLACE INTO sessions
                   (session_id, name, external_key, world_name, started_at, ended_at,
-                   last_tick, end_reason, snapshot_name, favorite, format_version)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""")) {
+                   last_tick, end_reason, snapshot_name, favorite, format_version,
+                   world_seed, world_environment)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""")) {
             p.setString(1, record.sessionId().toString());
             p.setString(2, record.name());
             p.setString(3, record.externalKey());
@@ -136,6 +181,12 @@ public final class MetadataDatabase implements AutoCloseable {
             p.setString(9, record.snapshotName());
             p.setInt(10, record.favorite() ? 1 : 0);
             p.setInt(11, record.formatVersion());
+            if (record.worldSeed() != null) {
+                p.setLong(12, record.worldSeed());
+            } else {
+                p.setNull(12, java.sql.Types.INTEGER);
+            }
+            p.setString(13, record.worldEnvironment());
             p.executeUpdate();
         }
     }
@@ -172,7 +223,7 @@ public final class MetadataDatabase implements AutoCloseable {
 
     public synchronized Optional<SessionRecord> getSession(UUID sessionId) throws SQLException {
         try (PreparedStatement p = connection.prepareStatement(
-                "SELECT * FROM sessions WHERE session_id=?")) {
+                SESSION_SELECT + "WHERE s.session_id=?")) {
             p.setString(1, sessionId.toString());
             try (ResultSet rs = p.executeQuery()) {
                 return rs.next() ? Optional.of(readSession(rs)) : Optional.empty();
@@ -182,7 +233,7 @@ public final class MetadataDatabase implements AutoCloseable {
 
     public synchronized List<SessionRecord> listSessions(int limit) throws SQLException {
         try (PreparedStatement p = connection.prepareStatement(
-                "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?")) {
+                SESSION_SELECT + "ORDER BY s.started_at DESC LIMIT ?")) {
             p.setInt(1, limit);
             try (ResultSet rs = p.executeQuery()) {
                 List<SessionRecord> sessions = new ArrayList<>();
@@ -205,6 +256,9 @@ public final class MetadataDatabase implements AutoCloseable {
     }
 
     private SessionRecord readSession(ResultSet rs) throws SQLException {
+        // read world_seed (nullable) first: wasNull() reflects the most recently read column
+        long rawWorldSeed = rs.getLong("world_seed");
+        Long worldSeed = rs.wasNull() ? null : rawWorldSeed;
         return new SessionRecord(
                 UUID.fromString(rs.getString("session_id")),
                 rs.getString("name"),
@@ -216,7 +270,9 @@ public final class MetadataDatabase implements AutoCloseable {
                 rs.getString("end_reason"),
                 rs.getString("snapshot_name"),
                 rs.getInt("favorite") != 0,
-                rs.getInt("format_version"));
+                rs.getInt("format_version"),
+                worldSeed,
+                rs.getString("world_environment"));
     }
 
     // --- players ---

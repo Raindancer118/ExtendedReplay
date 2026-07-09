@@ -8,7 +8,9 @@ import dev.raindancer118.extendedreplay.core.model.TimelineEvent;
 import dev.raindancer118.extendedreplay.core.pipeline.CaptureMetrics;
 import dev.raindancer118.extendedreplay.core.protocol.PacketType;
 import dev.raindancer118.extendedreplay.core.protocol.ReplayPacket;
+import dev.raindancer118.extendedreplay.storage.meta.MetadataDatabase;
 import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
+import dev.raindancer118.extendedreplay.storage.segment.SegmentFile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -200,7 +202,8 @@ class ReplayStorageTest {
                 record.externalKey(), record.worldName(),
                 System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000,
                 record.endedAtMillis(), record.lastTick(), record.endReason(),
-                record.snapshotName(), false, record.formatVersion()));
+                record.snapshotName(), false, record.formatVersion(),
+                record.worldSeed(), record.worldEnvironment()));
 
         var deleted = storage.cleanup(30, Long.MAX_VALUE);
         assertThat(deleted).containsExactly(sessionId);
@@ -215,10 +218,33 @@ class ReplayStorageTest {
                 record.externalKey(), record.worldName(),
                 System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000,
                 record.endedAtMillis(), record.lastTick(), record.endReason(),
-                record.snapshotName(), true, record.formatVersion()));
+                record.snapshotName(), true, record.formatVersion(),
+                record.worldSeed(), record.worldEnvironment()));
 
         assertThat(storage.cleanup(30, Long.MAX_VALUE)).isEmpty();
         assertThat(storage.getSession(sessionId)).isPresent();
+    }
+
+    @Test
+    void liveSessionReportsLastTickFromFlushedSegments() throws Exception {
+        // Session still running (no SessionEnd yet) -> sessions.last_tick stays 0.
+        storage.ingest(new ReplayPacket.SessionStart(sessionId, "live-match", null, "arena",
+                System.currentTimeMillis(), FormatConstants.FORMAT_VERSION,
+                0, 0, 0, 0, 0, 0, false, Map.of()));
+
+        // A segment has already been flushed to disk/index by the pipeline, e.g. on a
+        // periodic timer, even though the session itself hasn't ended.
+        storage.database().insertSegment(new SegmentFile(sessionId, 0, 0, 853, 853, 1024, 42L,
+                SegmentFile.fileName(0)));
+
+        SessionRecord bySession = storage.getSession(sessionId).orElseThrow();
+        assertThat(bySession.isFinished()).isFalse();
+        assertThat(bySession.lastTick()).isEqualTo(853);
+
+        SessionRecord fromList = storage.listSessions(10).stream()
+                .filter(r -> r.sessionId().equals(sessionId))
+                .findFirst().orElseThrow();
+        assertThat(fromList.lastTick()).isEqualTo(853);
     }
 
     @Test
@@ -226,5 +252,82 @@ class ReplayStorageTest {
         recordSampleSession();
         var deleted = storage.cleanup(1000, 1); // 1 byte cap forces deletion
         assertThat(deleted).containsExactly(sessionId);
+    }
+
+    @Test
+    void sessionStartMetadataPopulatesWorldSeedAndEnvironment() throws Exception {
+        storage.ingest(new ReplayPacket.SessionStart(sessionId, "seeded-match", null, "arena",
+                System.currentTimeMillis(), FormatConstants.FORMAT_VERSION,
+                0, 0, 0, 0, 0, 0, false,
+                Map.of("world-seed", "123456789", "world-environment", "NETHER")));
+
+        SessionRecord record = storage.getSession(sessionId).orElseThrow();
+        assertThat(record.worldSeed()).isEqualTo(123456789L);
+        assertThat(record.worldEnvironment()).isEqualTo("NETHER");
+    }
+
+    @Test
+    void sessionStartWithoutSeedMetadataLeavesFieldsNull() throws Exception {
+        storage.ingest(new ReplayPacket.SessionStart(sessionId, "no-seed-match", null, "arena",
+                System.currentTimeMillis(), FormatConstants.FORMAT_VERSION,
+                0, 0, 0, 0, 0, 0, false, Map.of()));
+
+        SessionRecord record = storage.getSession(sessionId).orElseThrow();
+        assertThat(record.worldSeed()).isNull();
+        assertThat(record.worldEnvironment()).isNull();
+    }
+
+    @Test
+    void sessionStartWithMalformedSeedLeavesWorldSeedNull() throws Exception {
+        storage.ingest(new ReplayPacket.SessionStart(sessionId, "bad-seed-match", null, "arena",
+                System.currentTimeMillis(), FormatConstants.FORMAT_VERSION,
+                0, 0, 0, 0, 0, 0, false, Map.of("world-seed", "not-a-number")));
+
+        SessionRecord record = storage.getSession(sessionId).orElseThrow();
+        assertThat(record.worldSeed()).isNull();
+    }
+
+    @Test
+    void migratesPreExistingDatabaseWithoutWorldSeedColumns() throws Exception {
+        Path dbFile = tempDir.resolve("legacy/metadata.db");
+        Files.createDirectories(dbFile.getParent());
+        // hand-built schema as it looked before world_seed/world_environment existed
+        try (var connection = java.sql.DriverManager.getConnection(
+                "jdbc:sqlite:" + dbFile.toAbsolutePath());
+             var statement = connection.createStatement()) {
+            statement.execute("""
+                    CREATE TABLE sessions (
+                      session_id TEXT PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      external_key TEXT,
+                      world_name TEXT NOT NULL,
+                      started_at INTEGER NOT NULL,
+                      ended_at INTEGER NOT NULL DEFAULT 0,
+                      last_tick INTEGER NOT NULL DEFAULT 0,
+                      end_reason TEXT,
+                      snapshot_name TEXT,
+                      favorite INTEGER NOT NULL DEFAULT 0,
+                      format_version INTEGER NOT NULL
+                    )""");
+            statement.execute("""
+                    INSERT INTO sessions (session_id, name, external_key, world_name, started_at,
+                        ended_at, last_tick, end_reason, snapshot_name, favorite, format_version)
+                    VALUES ('%s', 'legacy', NULL, 'arena', 1000, 0, 0, NULL, NULL, 0, 1)
+                    """.formatted(sessionId));
+        }
+
+        try (MetadataDatabase database = new MetadataDatabase(dbFile)) {
+            SessionRecord existing = database.getSession(sessionId).orElseThrow();
+            assertThat(existing.worldSeed()).isNull();
+            assertThat(existing.worldEnvironment()).isNull();
+
+            // the migrated column must be fully usable afterwards
+            UUID freshId = UUID.randomUUID();
+            database.insertSession(new SessionRecord(freshId, "fresh", null, "arena",
+                    2000, 0, 0, null, null, false, 1, 42L, "NORMAL"));
+            SessionRecord fresh = database.getSession(freshId).orElseThrow();
+            assertThat(fresh.worldSeed()).isEqualTo(42L);
+            assertThat(fresh.worldEnvironment()).isEqualTo("NORMAL");
+        }
     }
 }

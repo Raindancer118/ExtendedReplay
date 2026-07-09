@@ -14,7 +14,9 @@ public record SessionRecord(
         String endReason,     // null while active
         String snapshotName,  // null when none referenced
         boolean favorite,
-        int formatVersion) {
+        int formatVersion,
+        Long worldSeed,          // null when the producer world's seed is unknown
+        String worldEnvironment) { // null when unknown; e.g. "NORMAL", "NETHER", "THE_END"
 
     public boolean isFinished() {
         return endedAtMillis > 0;
