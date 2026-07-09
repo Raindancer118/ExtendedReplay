@@ -121,14 +121,26 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         hotbar = new HotbarUI(this);
         snapshots = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService(this,
                 getServer().getWorldContainer().toPath().resolve(config.snapshotPath()));
-        playback = new PlaybackManager(this, config, replayServer, hotbar, snapshots);
+        // only the dedicated REPLAY server puts viewers in a lobby between sessions —
+        // STANDALONE is actually played/recorded on and keeps the classic restore behavior
+        boolean replayLobbyMode = config.role() == ServerRole.REPLAY;
+        playback = new PlaybackManager(this, config, replayServer, hotbar, snapshots, replayLobbyMode);
         playback.start();
         routes = new RouteManager(this, config, replayServer.storage());
         liveMirror = new dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager(
-                this, config, replayServer, snapshots, hotbar);
+                this, config, replayServer, snapshots, hotbar, replayLobbyMode);
         guiListener = new GuiListener(this, playback, replayServer.storage(), hotbar, routes);
         Bukkit.getPluginManager().registerEvents(guiListener, this);
         scheduleRetention();
+        if (replayLobbyMode) {
+            Bukkit.getPluginManager().registerEvents(
+                    new dev.raindancer118.extendedreplay.paper.gui.ReplayLobbyListener(this), this);
+            if (config.disableNaturalSpawning()) {
+                var spawningGuard = new dev.raindancer118.extendedreplay.paper.replay.NaturalSpawningGuard();
+                spawningGuard.disableForLoadedWorlds();
+                Bukkit.getPluginManager().registerEvents(spawningGuard, this);
+            }
+        }
     }
 
     /** Applies retention rules shortly after start and then once per day. */

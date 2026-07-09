@@ -28,6 +28,7 @@ public record ReplayConfig(
         int bindPort,
         int liveDelaySeconds,
         String playbackWorldPrefix,
+        boolean disableNaturalSpawning,
         // storage
         String storagePath,
         int segmentLengthSeconds,
@@ -65,6 +66,7 @@ public record ReplayConfig(
                 c.getInt("replay-server.bind-port", 8787),
                 c.getInt("replay-server.live-delay-seconds", 2),
                 c.getString("replay-server.playback-world-prefix", "erp_playback"),
+                c.getBoolean("replay-server.disable-natural-spawning", true),
                 c.getString("storage.path", "plugins/ExtendedReplay/replays"),
                 c.getInt("storage.segment-length-seconds", 30),
                 c.getInt("storage.max-days", 30),

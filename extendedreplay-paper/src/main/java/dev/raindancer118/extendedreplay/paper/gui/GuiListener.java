@@ -13,8 +13,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.plugin.Plugin;
 
 import java.sql.SQLException;
@@ -51,6 +54,13 @@ public final class GuiListener implements Listener {
 
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
+        // hotbar items (playback and lobby) may never be moved, shift-clicked away or
+        // swapped into another slot/inventory — checked before any GUI-specific dispatch
+        if (event.getWhoClicked() instanceof Player
+                && (hotbar.isTagged(event.getCurrentItem()) || hotbar.isTagged(event.getCursor()))) {
+            event.setCancelled(true);
+            return;
+        }
         if (event.getInventory().getHolder() instanceof InventoryInspectGui) {
             event.setCancelled(true);
             return;
@@ -117,10 +127,40 @@ public final class GuiListener implements Listener {
         }
     }
 
+    /** Blocks dragging a hotbar item across slots (e.g. splitting a stack out of it). */
+    @EventHandler
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (hotbar.isTagged(event.getOldCursor())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** Blocks dropping a hotbar item (Q key) out of the inventory entirely. */
+    @EventHandler
+    public void onDrop(PlayerDropItemEvent event) {
+        if (hotbar.isTagged(event.getItemDrop().getItemStack())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** Blocks swapping a hotbar item into the off-hand (F key). */
+    @EventHandler
+    public void onSwapHands(PlayerSwapHandItemsEvent event) {
+        if (hotbar.isTagged(event.getMainHandItem()) || hotbar.isTagged(event.getOffHandItem())) {
+            event.setCancelled(true);
+        }
+    }
+
     // --- hotbar ---
 
     @EventHandler
     public void onInteract(PlayerInteractEvent event) {
+        HotbarUI.LobbyAction lobbyAction = hotbar.lobbyActionOf(event.getItem());
+        if (lobbyAction != null) {
+            event.setCancelled(true);
+            dispatchLobbyAction(event.getPlayer(), lobbyAction);
+            return;
+        }
         HotbarUI.Action action = hotbar.actionOf(event.getItem());
         if (action == null) {
             return;
@@ -188,6 +228,72 @@ public final class GuiListener implements Listener {
         PlaybackControlGui.open(player, plugin, session);
     }
 
+    // --- lobby hotbar (REPLAY server) ---
+
+    private void dispatchLobbyAction(Player player, HotbarUI.LobbyAction action) {
+        switch (action) {
+            case BROWSE_SESSIONS -> openSessionBrowser(player);
+            case LIVE_MIRROR -> joinLiveMirror(player);
+            case PLAY_LAST -> playLastSession(player);
+            case HELP -> sendLobbyHelp(player);
+        }
+    }
+
+    private void joinLiveMirror(Player player) {
+        var live = plugin.liveMirror();
+        if (live == null) {
+            player.sendMessage(Component.text("Live-Mirror ist auf diesem Server nicht verfügbar."));
+            return;
+        }
+        UUID liveId = plugin.replayServer() != null
+                ? plugin.replayServer().anyLiveSession().orElse(null) : null;
+        if (liveId == null) {
+            player.sendMessage(Component.text("Keine laufende Live-Session."));
+            return;
+        }
+        live.join(player, liveId);
+    }
+
+    /** Loads the most recently finished session, mirroring /erp play's error handling. */
+    private void playLastSession(Player player) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            SessionRecord latest;
+            try {
+                latest = storage.listSessions(50).stream()
+                        .filter(SessionRecord::isFinished)
+                        .findFirst()
+                        .orElse(null);
+            } catch (SQLException e) {
+                plugin.getLogger().log(Level.WARNING, "Loading latest session failed", e);
+                Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
+                        Component.text("Sessions konnten nicht geladen werden.")));
+                return;
+            }
+            if (latest == null) {
+                Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
+                        Component.text("Keine beendete Session vorhanden.")));
+                return;
+            }
+            UUID sessionId = latest.sessionId();
+            String name = latest.name();
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                player.sendMessage(Component.text("Lade Session " + name + "…"));
+                playback.open(sessionId, player).whenComplete((session, error) -> {
+                    if (error != null) {
+                        Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
+                                Component.text("Konnte Session nicht öffnen: " + dev.raindancer118.extendedreplay.paper.util.Errors.describe(error))));
+                    }
+                });
+            });
+        });
+    }
+
+    private void sendLobbyHelp(Player player) {
+        player.sendMessage(Component.text("— ExtendedReplay Lobby —"));
+        player.sendMessage(Component.text("📼 Session-Browser · 📡 Live-Mirror beitreten"));
+        player.sendMessage(Component.text("⏱ Letzte Session abspielen · /erp help für alle Befehle"));
+    }
+
     // --- session browser GUI ---
 
     /**
@@ -253,7 +359,7 @@ public final class GuiListener implements Listener {
         playback.open(record.sessionId(), player).whenComplete((session, error) -> {
             if (error != null) {
                 Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
-                        Component.text("Konnte Session nicht öffnen: " + error.getMessage())));
+                        Component.text("Konnte Session nicht öffnen: " + dev.raindancer118.extendedreplay.paper.util.Errors.describe(error))));
             }
         });
     }

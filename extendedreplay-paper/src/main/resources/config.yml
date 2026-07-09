@@ -38,6 +38,8 @@ replay-server:
   bind-port: 8787
   live-delay-seconds: 2
   playback-world-prefix: erp_playback
+  # dedicated replay servers only watch replays — no real monsters should spawn there
+  disable-natural-spawning: true
 
 storage:
   path: plugins/ExtendedReplay/replays
