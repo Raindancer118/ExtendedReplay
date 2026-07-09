@@ -199,7 +199,7 @@ transport:
 | Group | Commands |
 |-------|----------|
 | **General** | `/erp` · `gui` · `help` · `status` · `test` |
-| **Recording** | `record start <name>` · `record stop` · `sessions` · `session <id>` |
+| **Recording** | `record start [name] [snapshot\|-] [world]` (console needs the world arg or uses the default world) · `record stop` · `sessions` · `session <id>` |
 | **Playback** | `play <id>` · `pause` · `resume` · `speed <0.25–8>` · `jump <time>` · `rewind <s>` · `forward <s>` · `close` |
 | **Live** | `live` |
 | **Events** | `events` · `event <id>` · `jump event <id>` · `bookmark <name>` · `bookmarks` |
@@ -266,6 +266,7 @@ session.end(ReplaySessionEndReason.COMPLETED);
 | Heatmaps — movement/kills/deaths/loot, log-scaled gradient | ✅ implemented |
 | Camera slots & POV mode (`/erp cam …`, `/erp pov <player>`) | ✅ implemented |
 | Retention & integrity — auto-cleanup, `/erp cleanup`, `/erp verify`, `/erp reindex` | ✅ implemented & unit-tested |
+| Entity capture & playback — spawns/despawns + 20 Hz frames of mobs, items, projectiles | ✅ implemented (frozen real entities in playback & live mirror) |
 | Minigame integration example (`extendedreplay-integration-example`) | ✅ compiles against the public API |
 
 `/erp test` runs an end-to-end self-test on any REPLAY/STANDALONE server: it records a
@@ -273,11 +274,14 @@ synthetic session through the real pipeline into segment files, reads it back an
 verifies every checksum.
 
 **Honest caveats:** the storage, transport, protocol and snapshot layers are covered by
-automated tests; the in-game layer (capture listeners, playback, GUIs, live mirror) is
-verified by compilation against the Paper 1.21.10 API plus a real-server boot and
-pipeline self-test — a full multiplayer match recording has not been part of CI. POV is
-an approximation (camera lock to the actor's eye line), not a client-side first-person
-reproduction.
+automated tests. The distributed pipeline (PRODUCER → WebSocket → REPLAY) has been
+verified end-to-end on real infrastructure: two separate Paper 1.21.10 servers, a
+console-driven recording with world activity, live segment streaming, clean session end
+and a green `/erp verify` (checksums) afterwards. What has *not* been exercised yet is a
+full multiplayer match with real players (player frames, PvP events, GUIs under load) —
+that part is verified by compilation, server boot and the pipeline self-test only. POV
+is an approximation (camera lock to the actor's eye line), not a client-side
+first-person reproduction.
 
 **Design principles** (non-negotiable):
 
