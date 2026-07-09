@@ -5,6 +5,7 @@ import dev.raindancer118.extendedreplay.paper.config.ReplayConfig;
 import dev.raindancer118.extendedreplay.paper.replay.render.ArmorStandRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.MannequinRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.ReplayActorRenderer;
+import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
@@ -124,10 +125,16 @@ public final class PlaybackManager {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             List<ReplayPacket> packets;
             String name;
+            Long worldSeed;
+            String worldEnvironment;
+            String snapshotName;
             try {
                 packets = replayServer.storage().loadSession(sessionId);
-                name = replayServer.storage().getSession(sessionId)
-                        .map(r -> r.name()).orElse(sessionId.toString());
+                SessionRecord sessionRecord = replayServer.storage().getSession(sessionId).orElse(null);
+                name = sessionRecord != null ? sessionRecord.name() : sessionId.toString();
+                worldSeed = sessionRecord != null ? sessionRecord.worldSeed() : null;
+                worldEnvironment = sessionRecord != null ? sessionRecord.worldEnvironment() : null;
+                snapshotName = sessionRecord != null ? sessionRecord.snapshotName() : null;
             } catch (IOException | SQLException e) {
                 future.completeExceptionally(e);
                 return;
@@ -138,18 +145,15 @@ public final class PlaybackManager {
                 return;
             }
             String finalName = name;
-            String snapshotName;
-            try {
-                snapshotName = replayServer.storage().getSession(sessionId)
-                        .map(r -> r.snapshotName()).orElse(null);
-            } catch (SQLException e) {
-                snapshotName = null;
-            }
+            Long finalWorldSeed = worldSeed;
+            String finalWorldEnvironment = worldEnvironment;
             String finalSnapshotName = snapshotName;
             Bukkit.getScheduler().runTask(plugin, () -> {
                 try {
-                    World world = PlaybackWorlds.getOrCreate(
-                            config.playbackWorldPrefix() + "_" + (worldCounter++));
+                    String worldName = config.playbackWorldPrefix() + "_" + (worldCounter++);
+                    World world = finalWorldSeed != null
+                            ? PlaybackWorlds.getOrCreate(worldName, finalWorldSeed, finalWorldEnvironment)
+                            : PlaybackWorlds.getOrCreate(worldName);
                     PlaybackSession session = new PlaybackSession(sessionId, finalName, world,
                             createRenderer(), packets,
                             config.keyframeIntervalSeconds() * 20);

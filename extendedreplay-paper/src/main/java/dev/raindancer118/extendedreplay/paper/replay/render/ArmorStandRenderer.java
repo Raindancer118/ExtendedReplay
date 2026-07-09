@@ -4,25 +4,17 @@ import dev.raindancer118.extendedreplay.core.model.EquipmentChange;
 import dev.raindancer118.extendedreplay.core.model.PlayerFrame;
 import dev.raindancer118.extendedreplay.core.model.PlayerProfileData;
 import dev.raindancer118.extendedreplay.core.protocol.PacketIO;
+import dev.raindancer118.extendedreplay.paper.gui.Heads;
 import dev.raindancer118.extendedreplay.paper.util.ItemBytes;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Location;
-import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.SkullMeta;
-import org.bukkit.profile.PlayerProfile;
-import org.bukkit.profile.PlayerTextures;
 
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Fallback renderer: armor stands with the recorded player's head, name tag and
@@ -47,51 +39,10 @@ public final class ArmorStandRenderer implements ReplayActorRenderer {
             entity.setBasePlate(false);
             entity.customName(Component.text(profile.name()));
             entity.setCustomNameVisible(nameTagsVisible);
-            ItemStack head = playerHead(profile);
-            if (head != null) {
-                entity.getEquipment().setItem(EquipmentSlot.HEAD, head);
-            }
+            ItemStack head = Heads.playerHead(profile);
+            entity.getEquipment().setItem(EquipmentSlot.HEAD, head);
         });
         actors.put(playerIndex, stand);
-    }
-
-    private static ItemStack playerHead(PlayerProfileData profile) {
-        ItemStack head = new ItemStack(Material.PLAYER_HEAD);
-        if (!(head.getItemMeta() instanceof SkullMeta meta)) {
-            return null;
-        }
-        PlayerProfile bukkitProfile = org.bukkit.Bukkit.createPlayerProfile(
-                profile.uuid(), profile.name());
-        if (profile.hasSkin()) {
-            URL skinUrl = skinUrlFromTexturesProperty(profile.skinTextureValue());
-            if (skinUrl != null) {
-                PlayerTextures textures = bukkitProfile.getTextures();
-                textures.setSkin(skinUrl);
-                bukkitProfile.setTextures(textures);
-            }
-        }
-        meta.setOwnerProfile(bukkitProfile);
-        head.setItemMeta(meta);
-        return head;
-    }
-
-    /** Extracts the skin URL out of the base64 "textures" property without a JSON library. */
-    static URL skinUrlFromTexturesProperty(String base64) {
-        try {
-            String json = new String(Base64.getDecoder().decode(base64), StandardCharsets.UTF_8);
-            int urlIndex = json.indexOf("\"url\"");
-            if (urlIndex < 0) {
-                return null;
-            }
-            int start = json.indexOf('"', json.indexOf(':', urlIndex) + 1) + 1;
-            int end = json.indexOf('"', start);
-            if (start <= 0 || end <= start) {
-                return null;
-            }
-            return java.net.URI.create(json.substring(start, end)).toURL();
-        } catch (IllegalArgumentException | MalformedURLException e) {
-            return null;
-        }
     }
 
     @Override

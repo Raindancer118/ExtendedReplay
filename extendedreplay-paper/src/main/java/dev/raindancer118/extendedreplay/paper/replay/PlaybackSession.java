@@ -1,11 +1,13 @@
 package dev.raindancer118.extendedreplay.paper.replay;
 
 import dev.raindancer118.extendedreplay.core.model.ContainerSnapshot;
+import dev.raindancer118.extendedreplay.core.model.EntityFrame;
 import dev.raindancer118.extendedreplay.core.model.EquipmentChange;
 import dev.raindancer118.extendedreplay.core.model.InventorySnapshot;
 import dev.raindancer118.extendedreplay.core.model.PlayerFrame;
 import dev.raindancer118.extendedreplay.core.model.PlayerProfileData;
 import dev.raindancer118.extendedreplay.core.protocol.ReplayPacket;
+import dev.raindancer118.extendedreplay.paper.replay.render.EntityActorRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.ReplayActorRenderer;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Location;
@@ -42,6 +44,10 @@ public final class PlaybackSession {
     private final Map<String, NavigableMap<Integer, ContainerSnapshot>> containers = new HashMap<>();
     private final Map<Integer, PlayerFrame> lastFrames = new HashMap<>();
     private final Map<Integer, Integer> appliedEquipmentVersion = new HashMap<>();
+    private final EntityActorRenderer entityRenderer = new EntityActorRenderer();
+    private final Map<Integer, ReplayPacket.EntitySpawn> entitySpawns = new HashMap<>();
+    private final Map<Integer, EntityFrame> lastEntityFrames = new HashMap<>();
+    private final java.util.Set<Integer> aliveEntities = new java.util.HashSet<>();
     private final int lastTick;
 
     private record BlockKey(int x, int y, int z) {
@@ -49,7 +55,9 @@ public final class PlaybackSession {
 
     /** Precomputed state checkpoints for fast backward seeks. */
     private record Keyframe(int tick, Map<BlockKey, String> blocks,
-                            Map<Integer, PlayerFrame> frames) {
+                            Map<Integer, PlayerFrame> frames,
+                            java.util.Set<Integer> aliveEntities,
+                            Map<Integer, EntityFrame> entityFrames) {
     }
 
     private final NavigableMap<Integer, Keyframe> keyframes = new TreeMap<>();
@@ -77,6 +85,9 @@ public final class PlaybackSession {
             if (packet instanceof ReplayPacket.PlayerProfile p) {
                 profiles.put(p.profile().playerIndex(), p.profile());
             }
+            if (packet instanceof ReplayPacket.EntitySpawn p) {
+                entitySpawns.put(p.entityId(), p);
+            }
             if (packet instanceof ReplayPacket.EquipmentChangePacket p) {
                 equipmentByVersion.put(p.change().version(), p.change());
             }
@@ -103,11 +114,14 @@ public final class PlaybackSession {
     private void buildKeyframes(int interval) {
         Map<BlockKey, String> blockState = new HashMap<>();
         Map<Integer, PlayerFrame> frameState = new HashMap<>();
+        java.util.Set<Integer> aliveState = new java.util.HashSet<>();
+        Map<Integer, EntityFrame> entityFrameState = new HashMap<>();
         int nextKeyframe = interval;
         for (Map.Entry<Integer, List<ReplayPacket>> entry : timeline.entrySet()) {
             while (entry.getKey() >= nextKeyframe) {
                 keyframes.put(nextKeyframe - 1, new Keyframe(nextKeyframe - 1,
-                        Map.copyOf(blockState), Map.copyOf(frameState)));
+                        Map.copyOf(blockState), Map.copyOf(frameState),
+                        java.util.Set.copyOf(aliveState), Map.copyOf(entityFrameState)));
                 nextKeyframe += interval;
             }
             for (ReplayPacket packet : entry.getValue()) {
@@ -118,6 +132,13 @@ public final class PlaybackSession {
                     frameState.put(p.frame().playerIndex(), p.frame());
                 } else if (packet instanceof ReplayPacket.PlayerQuit p) {
                     frameState.remove(p.playerIndex());
+                } else if (packet instanceof ReplayPacket.EntitySpawn p) {
+                    aliveState.add(p.entityId());
+                } else if (packet instanceof ReplayPacket.EntityFramePacket p) {
+                    entityFrameState.put(p.frame().entityId(), p.frame());
+                } else if (packet instanceof ReplayPacket.EntityDespawn p) {
+                    aliveState.remove(p.entityId());
+                    entityFrameState.remove(p.entityId());
                 }
             }
         }
@@ -226,7 +247,10 @@ public final class PlaybackSession {
         if (target < appliedUpTo) {
             blockApplier.restoreAll();
             renderer.despawnAll();
+            entityRenderer.despawnAll();
             lastFrames.clear();
+            lastEntityFrames.clear();
+            aliveEntities.clear();
             appliedEquipmentVersion.clear();
             appliedUpTo = -1;
             Map.Entry<Integer, Keyframe> entry = keyframes.floorEntry(target);
@@ -237,6 +261,8 @@ public final class PlaybackSession {
                             block.getKey().z(), block.getValue());
                 }
                 lastFrames.putAll(keyframe.frames());
+                aliveEntities.addAll(keyframe.aliveEntities());
+                lastEntityFrames.putAll(keyframe.entityFrames());
                 appliedUpTo = keyframe.tick();
             }
         }
@@ -297,6 +323,29 @@ public final class PlaybackSession {
                 }
                 lastFrames.remove(p.playerIndex());
             }
+            case ReplayPacket.EntitySpawn p -> {
+                aliveEntities.add(p.entityId());
+                if (!fastForward) {
+                    entityRenderer.spawn(world, p.entityId(), p.entityType(),
+                            new Location(world, p.x(), p.y(), p.z(), p.yaw(), p.pitch()),
+                            p.metadata());
+                }
+            }
+            case ReplayPacket.EntityFramePacket p -> {
+                EntityFrame frame = p.frame();
+                lastEntityFrames.put(frame.entityId(), frame);
+                if (!fastForward) {
+                    ensureEntitySpawned(frame.entityId());
+                    entityRenderer.applyFrame(frame);
+                }
+            }
+            case ReplayPacket.EntityDespawn p -> {
+                aliveEntities.remove(p.entityId());
+                lastEntityFrames.remove(p.entityId());
+                if (!fastForward) {
+                    entityRenderer.despawn(p.entityId());
+                }
+            }
             default -> {
                 // profiles/equipment/inventories/containers are pre-indexed; events are
                 // browsed through the database, not re-emitted during playback
@@ -325,6 +374,29 @@ public final class PlaybackSession {
             renderer.applyFrame(entry.getKey(), world, frame);
             applyEquipmentVersion(entry.getKey(), frame.equipmentVersion());
         }
+        for (Integer entityId : aliveEntities) {
+            ensureEntitySpawned(entityId);
+            EntityFrame frame = lastEntityFrames.get(entityId);
+            if (frame != null) {
+                entityRenderer.applyFrame(frame);
+            }
+        }
+    }
+
+    /** Spawns the entity actor from its recorded spawn packet if it is not present. */
+    private void ensureEntitySpawned(int entityId) {
+        if (entityRenderer.isSpawned(entityId)) {
+            return;
+        }
+        ReplayPacket.EntitySpawn spawn = entitySpawns.get(entityId);
+        if (spawn == null) {
+            return;
+        }
+        EntityFrame frame = lastEntityFrames.get(entityId);
+        Location location = frame != null
+                ? new Location(world, frame.x(), frame.y(), frame.z())
+                : new Location(world, spawn.x(), spawn.y(), spawn.z(), spawn.yaw(), spawn.pitch());
+        entityRenderer.spawn(world, entityId, spawn.entityType(), location, spawn.metadata());
     }
 
     private void applyEquipmentVersion(int playerIndex, int version) {
@@ -401,6 +473,7 @@ public final class PlaybackSession {
     /** Restores the world and removes all actors. */
     public void close() {
         renderer.despawnAll();
+        entityRenderer.despawnAll();
         blockApplier.restoreAll();
         viewers.clear();
     }

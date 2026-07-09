@@ -9,9 +9,11 @@ import dev.raindancer118.extendedreplay.paper.replay.PlaybackWorlds;
 import dev.raindancer118.extendedreplay.paper.replay.ReplayServerManager;
 import dev.raindancer118.extendedreplay.paper.replay.WorldStateApplier;
 import dev.raindancer118.extendedreplay.paper.replay.render.ArmorStandRenderer;
+import dev.raindancer118.extendedreplay.paper.replay.render.EntityActorRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.MannequinRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.ReplayActorRenderer;
 import dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService;
+import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
@@ -21,6 +23,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -56,6 +59,7 @@ public final class LiveMirrorManager {
     private UUID mirroredSession;
     private World mirrorWorld;
     private ReplayActorRenderer renderer;
+    private EntityActorRenderer entityRenderer;
     private WorldStateApplier blockApplier;
     private BukkitTask tickTask;
     private volatile boolean sessionEnded;
@@ -107,8 +111,25 @@ public final class LiveMirrorManager {
     private void start(UUID liveSessionId) {
         mirroredSession = liveSessionId;
         sessionEnded = false;
-        mirrorWorld = PlaybackWorlds.getOrCreate(config.playbackWorldPrefix() + "_live");
+
+        // The live-mirror world name is reused across sessions, so a stale world generated
+        // for a different (or no) seed must be recreated rather than just reused.
+        Long worldSeed = null;
+        String worldEnvironment = null;
+        try {
+            SessionRecord sessionRecord = replayServer.storage().getSession(liveSessionId).orElse(null);
+            if (sessionRecord != null) {
+                worldSeed = sessionRecord.worldSeed();
+                worldEnvironment = sessionRecord.worldEnvironment();
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().warning(
+                    "Could not read session metadata for live mirror seed: " + e.getMessage());
+        }
+        mirrorWorld = PlaybackWorlds.recreateIfSeedDiffers(
+                config.playbackWorldPrefix() + "_live", worldSeed, worldEnvironment);
         renderer = createRenderer();
+        entityRenderer = new EntityActorRenderer();
         blockApplier = new WorldStateApplier(mirrorWorld);
         buffer.clear();
         profiles.clear();
@@ -180,6 +201,14 @@ public final class LiveMirrorManager {
                     blockApplier.apply(p.change());
             case ReplayPacket.PlayerQuit p when p.sessionId().equals(mirroredSession) ->
                     renderer.despawnActor(p.playerIndex());
+            case ReplayPacket.EntitySpawn p when p.sessionId().equals(mirroredSession) ->
+                    entityRenderer.spawn(mirrorWorld, p.entityId(), p.entityType(),
+                            new Location(mirrorWorld, p.x(), p.y(), p.z(), p.yaw(), p.pitch()),
+                            p.metadata());
+            case ReplayPacket.EntityFramePacket p when p.sessionId().equals(mirroredSession) ->
+                    entityRenderer.applyFrame(p.frame());
+            case ReplayPacket.EntityDespawn p when p.sessionId().equals(mirroredSession) ->
+                    entityRenderer.despawn(p.entityId());
             case ReplayPacket.SessionEnd p when p.sessionId().equals(mirroredSession) ->
                     sessionEnded = true;
             default -> {
@@ -239,6 +268,10 @@ public final class LiveMirrorManager {
         viewers.clear();
         if (renderer != null) {
             renderer.despawnAll();
+        }
+        if (entityRenderer != null) {
+            entityRenderer.despawnAll();
+            entityRenderer = null;
         }
         if (blockApplier != null) {
             blockApplier.restoreAll();
