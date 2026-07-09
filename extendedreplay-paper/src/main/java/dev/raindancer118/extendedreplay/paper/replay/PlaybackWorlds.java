@@ -62,17 +62,22 @@ public final class PlaybackWorlds {
     }
 
     private static World createWorld(String name, Long seed, String environment) {
+        // keepSpawnLoaded(FALSE): skip generating the whole spawn-chunk plate on the main
+        // thread — a seeded natural world would otherwise freeze the server for seconds
+        // (observed >10s watchdog dumps); chunks stream in when the viewer teleports
         if (seed != null) {
             WorldCreator creator = new WorldCreator(name)
                     .seed(seed)
                     .environment(parseEnvironment(environment))
-                    .generateStructures(true);
+                    .generateStructures(true)
+                    .keepSpawnLoaded(net.kyori.adventure.util.TriState.FALSE);
             return creator.createWorld();
         }
         WorldCreator creator = new WorldCreator(name)
                 .generator(new VoidGenerator())
                 .type(WorldType.FLAT)
-                .generateStructures(false);
+                .generateStructures(false)
+                .keepSpawnLoaded(net.kyori.adventure.util.TriState.FALSE);
         return creator.createWorld();
     }
 
