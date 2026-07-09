@@ -22,8 +22,10 @@ public final class ActiveSession {
     private final AtomicInteger tick = new AtomicInteger();
     private final Map<UUID, Integer> playerIndexes = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> equipmentVersions = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> entityIndexes = new ConcurrentHashMap<>();
     private final AtomicInteger nextPlayerIndex = new AtomicInteger();
     private final AtomicInteger nextEquipmentVersion = new AtomicInteger();
+    private final AtomicInteger nextEntityIndex = new AtomicInteger();
     private volatile boolean active = true;
 
     public ActiveSession(UUID sessionId, String name, String externalKey, String worldName,
@@ -104,6 +106,27 @@ public final class ActiveSession {
         int version = nextEquipmentVersion.incrementAndGet();
         equipmentVersions.put(playerId, version);
         return version;
+    }
+
+    /** Returns the stable per-session id of the entity, or -1 if not tracked. */
+    public int entityIndex(UUID entityId) {
+        Integer index = entityIndexes.get(entityId);
+        return index != null ? index : -1;
+    }
+
+    /** Tracks the entity if unknown; returns true when this call created the id. */
+    public boolean registerEntity(UUID entityId) {
+        return entityIndexes.putIfAbsent(entityId, nextEntityIndex.getAndIncrement()) == null;
+    }
+
+    public boolean isTrackedEntity(UUID entityId) {
+        return entityIndexes.containsKey(entityId);
+    }
+
+    /** Stops tracking; returns the id it had, or -1. */
+    public int forgetEntity(UUID entityId) {
+        Integer index = entityIndexes.remove(entityId);
+        return index != null ? index : -1;
     }
 
     public boolean inBounds(String world, double x, double y, double z) {

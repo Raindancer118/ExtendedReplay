@@ -23,6 +23,7 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,6 +50,7 @@ public final class ProducerManager {
     private final CaptureMetrics metrics;
     private final EquipmentTracker equipmentTracker;
     private final InventoryTracker inventoryTracker;
+    private final EntityTracker entityTracker;
 
     private final Map<String, ActiveSession> sessionsByWorld = new ConcurrentHashMap<>();
     private final Map<UUID, ActiveSession> sessionsById = new ConcurrentHashMap<>();
@@ -65,6 +67,7 @@ public final class ProducerManager {
         this.queue = new RecordingQueue(config.maxQueueSize());
         this.equipmentTracker = new EquipmentTracker(this);
         this.inventoryTracker = new InventoryTracker(this);
+        this.entityTracker = new EntityTracker(this);
         this.pipeline = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "ExtendedReplay-Pipeline");
             t.setDaemon(true);
@@ -110,22 +113,28 @@ public final class ProducerManager {
         sessionsByWorld.put(world.getName(), session);
         sessionsById.put(session.sessionId(), session);
 
+        // metadata may be null or immutable (e.g. Map.of()): copy defensively before enriching.
+        Map<String, String> sessionMetadata = metadata == null ? new HashMap<>() : new HashMap<>(metadata);
+        sessionMetadata.putIfAbsent("world-seed", Long.toString(world.getSeed()));
+        sessionMetadata.putIfAbsent("world-environment", world.getEnvironment().name());
+
         boolean hasBounds = bounds != null;
         offer(new ReplayPacket.SessionStart(session.sessionId(), name, externalKey,
                 world.getName(), session.startedAtMillis(), FormatConstants.FORMAT_VERSION,
                 hasBounds ? bounds.minX() : 0, hasBounds ? bounds.minY() : 0,
                 hasBounds ? bounds.minZ() : 0, hasBounds ? bounds.maxX() : 0,
                 hasBounds ? bounds.maxY() : 0, hasBounds ? bounds.maxZ() : 0,
-                hasBounds, metadata == null ? Map.of() : metadata));
+                hasBounds, sessionMetadata));
 
         recordEvent(session, "SESSION_START", "SESSION", null, null, null, true, Map.of());
-        if (metadata != null && metadata.containsKey("snapshot")) {
+        if (sessionMetadata.containsKey("snapshot")) {
             offer(new ReplayPacket.SnapshotReference(session.sessionId(),
-                    metadata.get("snapshot"), metadata.get("snapshot-sha256")));
+                    sessionMetadata.get("snapshot"), sessionMetadata.get("snapshot-sha256")));
         }
         for (Player player : world.getPlayers()) {
             registerPlayer(session, player);
         }
+        entityTracker.sessionStarted(session, world);
         plugin.getLogger().info("Recording session '" + name + "' started in world "
                 + world.getName() + " (" + session.sessionId() + ")");
         return session;
@@ -141,6 +150,7 @@ public final class ProducerManager {
         recordEvent(session, "SESSION_END", "SESSION", null, null, null, true,
                 Map.of("reason", reason.name()));
         offer(new ReplayPacket.SessionEnd(session.sessionId(), session.currentTick(), reason.name()));
+        entityTracker.sessionEnded(session.sessionId());
         plugin.getLogger().info("Recording session '" + session.name() + "' ended: " + reason);
     }
 
@@ -189,6 +199,7 @@ public final class ProducerManager {
             if (tick % 10 == 0) {
                 equipmentTracker.checkWorld(session, world, tick);
             }
+            entityTracker.sampleTick(session, world, tick);
         }
         inventoryTracker.flushEndOfTick();
         long elapsed = System.nanoTime() - start;
@@ -351,6 +362,10 @@ public final class ProducerManager {
 
     public EquipmentTracker equipmentTracker() {
         return equipmentTracker;
+    }
+
+    public EntityTracker entityTracker() {
+        return entityTracker;
     }
 
     public Plugin plugin() {

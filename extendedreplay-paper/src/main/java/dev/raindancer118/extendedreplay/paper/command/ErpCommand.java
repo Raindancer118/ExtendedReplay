@@ -62,7 +62,8 @@ public final class ErpCommand implements TabExecutor {
                 case "jump", "time" -> jump(sender, args);
                 case "rewind" -> relativeJump(sender, args, -1);
                 case "forward" -> relativeJump(sender, args, 1);
-                case "close" -> close(sender);
+                case "close", "disconnect" -> close(sender);
+                case "connect" -> connect(sender, args);
                 case "live" -> live(sender);
                 case "events" -> events(sender);
                 case "bookmark" -> bookmark(sender, args);
@@ -106,7 +107,7 @@ public final class ErpCommand implements TabExecutor {
             send(sender, "/erp record start <name> | stop · Aufnahme");
         }
         if (plugin.role().playsBack()) {
-            send(sender, "/erp sessions · /erp play <id> · /erp close");
+            send(sender, "/erp sessions · /erp play <id> · /erp connect <id> · /erp close");
             send(sender, "/erp pause|resume|speed <x>|jump <m:ss>|rewind|forward <s>");
             send(sender, "/erp events · /erp bookmarks · /erp scene …");
             send(sender, "/erp inventory <spieler> · /erp container <x> <y> <z>");
@@ -168,15 +169,26 @@ public final class ErpCommand implements TabExecutor {
             return true;
         }
         if (args.length >= 2 && args[1].equalsIgnoreCase("start")) {
-            if (!(sender instanceof Player player)) {
-                send(sender, "Nur in-game (Welt wird aus deiner Position bestimmt).");
-                return true;
+            // /erp record start [name] [snapshot] [world]
+            // In-game: world defaults to the player's world. Console: world argument
+            // or the server's default world.
+            org.bukkit.World world;
+            if (args.length >= 5) {
+                world = Bukkit.getWorld(args[4]);
+                if (world == null) {
+                    send(sender, "Welt '" + args[4] + "' nicht gefunden.");
+                    return true;
+                }
+            } else if (sender instanceof Player player) {
+                world = player.getWorld();
+            } else {
+                world = Bukkit.getWorlds().get(0);
             }
             String name = args.length >= 3 ? args[2]
                     : "session-" + System.currentTimeMillis() / 1000;
             Map<String, String> metadata = new java.util.HashMap<>();
-            metadata.put("started-by", player.getName());
-            if (args.length >= 4) {
+            metadata.put("started-by", sender.getName());
+            if (args.length >= 4 && !args[3].equals("-")) {
                 if (!plugin.snapshots().exists(args[3])) {
                     send(sender, "Snapshot '" + args[3] + "' existiert nicht — "
                             + "erst /erp snapshot create " + args[3]);
@@ -185,9 +197,10 @@ public final class ErpCommand implements TabExecutor {
                 metadata.put("snapshot", args[3]);
             }
             ActiveSession session = plugin.producer().startSession(name, null,
-                    player.getWorld(), null, metadata);
+                    world, null, metadata);
             send(sender, "Aufnahme gestartet: " + name + " (" + session.sessionId() + ")"
-                    + (args.length >= 4 ? " · Snapshot: " + args[3] : ""));
+                    + " · Welt: " + world.getName()
+                    + (metadata.containsKey("snapshot") ? " · Snapshot: " + args[3] : ""));
             return true;
         }
         if (args.length >= 2 && args[1].equalsIgnoreCase("stop")) {
@@ -349,6 +362,42 @@ public final class ErpCommand implements TabExecutor {
             plugin.playback().detachViewer(player);
             send(sender, "Playback geschlossen.");
         }
+        return true;
+    }
+
+    /**
+     * Connects to a session in a freshly generated playback world. Every playback opens
+     * its own world; when the recording carries the producer world's seed, that world is
+     * generated with the identical terrain — so the replay looks like the original arena
+     * even without a snapshot. Stored recordings are never touched by this.
+     */
+    private boolean connect(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player) || requireReplay(sender)) {
+            return true;
+        }
+        if (!sender.hasPermission("extendedreplay.playback")) {
+            return noPermission(sender);
+        }
+        if (args.length < 2) {
+            send(sender, "/erp connect <sessionId|name> — Session in frischer Seed-Welt öffnen");
+            return true;
+        }
+        // leave any current playback/mirror first so the viewer switches cleanly
+        if (plugin.liveMirror() != null && plugin.liveMirror().isViewer(player)) {
+            plugin.liveMirror().leave(player);
+        }
+        plugin.playback().detachViewer(player);
+        UUID id = resolveSessionId(sender, args[1]);
+        if (id == null) {
+            return true;
+        }
+        send(sender, "Verbinde mit Session… (Welt wird mit Original-Seed generiert)");
+        plugin.playback().open(id, player).whenComplete((session, error) -> {
+            if (error != null) {
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        send(sender, "Konnte Session nicht öffnen: " + error.getMessage()));
+            }
+        });
         return true;
     }
 
@@ -544,7 +593,8 @@ public final class ErpCommand implements TabExecutor {
                         + PlaybackSession.formatTicks(session.currentTick()));
                 return;
             }
-            InventoryInspectGui.openPlayerInventory(player, args[1], snapshot);
+            InventoryInspectGui.openPlayerInventory(player, args[1], snapshot,
+                    session.profiles().get(index));
         });
     }
 
@@ -981,13 +1031,27 @@ public final class ErpCommand implements TabExecutor {
     }
 
     private boolean gui(CommandSender sender) {
-        if (sender instanceof Player player && plugin.playback() != null
-                && plugin.playback().sessionOf(player).isPresent()) {
-            plugin.hotbar().give(player);
-            send(sender, "Hotbar-UI aktiviert.");
-        } else {
-            send(sender, "Erst eine Session öffnen: /erp play <id>");
+        if (sender instanceof Player player && plugin.playback() != null) {
+            PlaybackSession session = plugin.playback().sessionOf(player).orElse(null);
+            if (session != null) {
+                plugin.hotbar().give(player);
+                plugin.guiListener().openPlaybackControl(player, session);
+                send(sender, "Wiedergabe-GUI geöffnet.");
+                return true;
+            }
+            // no active playback and not currently watching the live mirror: offer the
+            // full session browser instead of the hotbar so the player can pick a recording
+            boolean isLiveViewer = plugin.liveMirror() != null && plugin.liveMirror().isViewer(player);
+            if (!isLiveViewer) {
+                if (!sender.hasPermission("extendedreplay.viewer")) {
+                    return noPermission(sender);
+                }
+                plugin.guiListener().openSessionBrowser(player);
+                send(sender, "Session-Browser wird geladen…");
+                return true;
+            }
         }
+        send(sender, "Erst eine Session öffnen: /erp play <id>");
         return true;
     }
 
@@ -1079,7 +1143,8 @@ public final class ErpCommand implements TabExecutor {
                 subs.add("snapshot");
             }
             if (plugin.role().playsBack()) {
-                subs.addAll(List.of("sessions", "session", "play", "pause", "resume", "speed",
+                subs.addAll(List.of("sessions", "session", "play", "connect", "disconnect",
+                        "pause", "resume", "speed",
                         "jump", "rewind", "forward", "close", "live", "events", "bookmarks",
                         "scene", "follow", "freecam", "pov", "cam", "inventory", "container",
                         "inspect", "route", "heatmap", "verify", "reindex", "delete",

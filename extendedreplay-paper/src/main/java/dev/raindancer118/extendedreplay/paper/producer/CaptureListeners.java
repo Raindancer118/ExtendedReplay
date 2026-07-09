@@ -32,6 +32,9 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
+import org.bukkit.event.world.TimeSkipEvent;
+import com.destroystokyo.paper.event.entity.EntityAddToWorldEvent;
+import com.destroystokyo.paper.event.entity.EntityRemoveFromWorldEvent;
 import io.papermc.paper.event.world.border.WorldBorderBoundsChangeEvent;
 
 import java.util.HashMap;
@@ -306,6 +309,20 @@ public final class CaptureListeners implements Listener {
                 Map.of("type", event.getEntityType().name()));
     }
 
+    // --- entities ---
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onEntityAdd(EntityAddToWorldEvent event) {
+        producer.sessionForWorld(event.getWorld().getName()).ifPresent(session ->
+                producer.entityTracker().track(session, event.getEntity()));
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onEntityRemove(EntityRemoveFromWorldEvent event) {
+        producer.sessionForWorld(event.getWorld().getName()).ifPresent(session ->
+                producer.entityTracker().untrack(session, event.getEntity()));
+    }
+
     // --- chat / world state ---
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -333,6 +350,19 @@ public final class CaptureListeners implements Listener {
         producer.sessionForWorld(event.getWorld().getName()).ifPresent(session ->
                 producer.recordEvent(session, "WEATHER_CHANGE", "WORLD", null, null, null,
                         true, Map.of("raining", Boolean.toString(event.toWeatherState()))));
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTimeSkip(TimeSkipEvent event) {
+        if (!producer.config().captureWeatherTime()) {
+            return;
+        }
+        producer.sessionForWorld(event.getWorld().getName()).ifPresent(session ->
+                producer.recordEvent(session, "TIME_CHANGE", "WORLD", null, null, null,
+                        true, Map.of("skip-amount", Long.toString(event.getSkipAmount()),
+                                "new-time", Long.toString(event.getWorld().getFullTime()
+                                        + event.getSkipAmount()),
+                                "reason", event.getSkipReason().name())));
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
