@@ -4,7 +4,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
-import org.bukkit.WorldType;
 import org.bukkit.entity.Player;
 import org.bukkit.generator.ChunkGenerator;
 
@@ -73,9 +72,10 @@ public final class PlaybackWorlds {
                     .keepSpawnLoaded(net.kyori.adventure.util.TriState.FALSE);
             return creator.createWorld();
         }
+        // no WorldType.FLAT here: the custom generator makes it meaningless and the empty
+        // flat settings made every world creation log "No key layers in MapLike[{}]"
         WorldCreator creator = new WorldCreator(name)
                 .generator(new VoidGenerator())
-                .type(WorldType.FLAT)
                 .generateStructures(false)
                 .keepSpawnLoaded(net.kyori.adventure.util.TriState.FALSE);
         return creator.createWorld();

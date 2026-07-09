@@ -42,15 +42,18 @@ public final class PlaybackManager {
     private final Map<UUID, Map<String, Location>> savedCameras = new HashMap<>();
     private BukkitTask tickTask;
     private int worldCounter;
+    private final boolean replayLobbyMode;
 
     public PlaybackManager(Plugin plugin, ReplayConfig config, ReplayServerManager replayServer,
                            dev.raindancer118.extendedreplay.paper.gui.HotbarUI hotbar,
-                           dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots) {
+                           dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots,
+                           boolean replayLobbyMode) {
         this.plugin = plugin;
         this.config = config;
         this.replayServer = replayServer;
         this.hotbar = hotbar;
         this.snapshots = snapshots;
+        this.replayLobbyMode = replayLobbyMode;
     }
 
     /** Per-viewer named camera positions (session-scoped, in memory). */
@@ -154,6 +157,10 @@ public final class PlaybackManager {
                     World world = finalWorldSeed != null
                             ? PlaybackWorlds.getOrCreate(worldName, finalWorldSeed, finalWorldEnvironment)
                             : PlaybackWorlds.getOrCreate(worldName);
+                    if (world == null) {
+                        throw new IllegalStateException(
+                                "Playback-Welt konnte nicht erstellt werden: " + worldName);
+                    }
                     PlaybackSession session = new PlaybackSession(sessionId, finalName, world,
                             createRenderer(), packets,
                             config.keyframeIntervalSeconds() * 20);
@@ -178,6 +185,14 @@ public final class PlaybackManager {
                     future.completeExceptionally(e);
                 }
             });
+        });
+        // the message consumers show error.getMessage() to the viewer — the full trace
+        // belongs in the server log, otherwise NPEs surface as an unhelpful "null"
+        future.whenComplete((session, error) -> {
+            if (error != null) {
+                plugin.getLogger().log(java.util.logging.Level.WARNING,
+                        "Opening playback session " + sessionId + " failed", error);
+            }
         });
         return future;
     }
@@ -209,7 +224,8 @@ public final class PlaybackManager {
         hotbar.give(viewer);
 
         Location start = firstActorLocation(session);
-        viewer.teleport(start != null ? start.clone().add(0, 5, 0)
+        // async: the target chunks of a freshly created seeded world may not exist yet
+        viewer.teleportAsync(start != null ? start.clone().add(0, 5, 0)
                 : session.world().getSpawnLocation());
         viewer.sendMessage(Component.text("Playback geöffnet: ").append(session.statusLine()));
     }
@@ -233,12 +249,21 @@ public final class PlaybackManager {
         session.removeViewer(viewer.getUniqueId());
 
         org.bukkit.inventory.ItemStack[] saved = savedInventories.remove(viewer.getUniqueId());
-        if (saved != null) {
-            viewer.getInventory().setContents(saved);
-        }
         GameMode previous = savedGameModes.remove(viewer.getUniqueId());
-        if (previous != null) {
-            viewer.setGameMode(previous);
+        if (replayLobbyMode) {
+            // dedicated replay server: viewers always return to the lobby hotbar instead of
+            // whatever was saved — stays correct even across restarts that lose these maps
+            viewer.setGameMode(GameMode.ADVENTURE);
+            viewer.setAllowFlight(true);
+            viewer.setFlying(true);
+            hotbar.giveLobby(viewer);
+        } else {
+            if (saved != null) {
+                viewer.getInventory().setContents(saved);
+            }
+            if (previous != null) {
+                viewer.setGameMode(previous);
+            }
         }
         World mainWorld = Bukkit.getWorlds().get(0);
         viewer.teleport(mainWorld.getSpawnLocation());
