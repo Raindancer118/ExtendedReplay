@@ -34,7 +34,7 @@ public final class HotbarUI {
         var inventory = viewer.getInventory();
         inventory.clear();
         inventory.setItem(0, item(Material.LIME_DYE, "▶ Play / Pause", Action.PLAY_PAUSE));
-        inventory.setItem(1, item(Material.CLOCK, "🕐 Timeline", Action.TIMELINE));
+        inventory.setItem(1, item(Material.CLOCK, "🕐 Wiedergabe-Steuerung", Action.TIMELINE));
         inventory.setItem(2, item(Material.BOOK, "📅 Event-Browser", Action.EVENTS));
         inventory.setItem(3, item(Material.PLAYER_HEAD, "👤 Spieler folgen", Action.FOLLOW));
         inventory.setItem(4, item(Material.ENDER_EYE, "🎥 Freecam", Action.CAMERA));

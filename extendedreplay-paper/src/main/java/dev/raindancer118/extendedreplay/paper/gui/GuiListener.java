@@ -4,7 +4,9 @@ import dev.raindancer118.extendedreplay.paper.replay.PlaybackManager;
 import dev.raindancer118.extendedreplay.paper.replay.PlaybackSession;
 import dev.raindancer118.extendedreplay.storage.ReplayStorage;
 import dev.raindancer118.extendedreplay.storage.meta.EventRecord;
+import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
 import net.kyori.adventure.text.Component;
+import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
@@ -17,6 +19,7 @@ import org.bukkit.plugin.Plugin;
 
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
@@ -32,7 +35,7 @@ public final class GuiListener implements Listener {
     private final ReplayStorage storage;
     private final HotbarUI hotbar;
     private final dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes;
-    private static final double[] SPEED_STEPS = {0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
+    private static final double[] SPEED_STEPS = PlaybackControlGui.SPEED_STEPS;
 
     public GuiListener(dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin plugin,
                        PlaybackManager playback, ReplayStorage storage, HotbarUI hotbar,
@@ -50,6 +53,21 @@ public final class GuiListener implements Listener {
     public void onInventoryClick(InventoryClickEvent event) {
         if (event.getInventory().getHolder() instanceof InventoryInspectGui) {
             event.setCancelled(true);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof PlaybackControlGui gui) {
+            event.setCancelled(true);
+            onPlaybackControlClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof PlayerSelectGui gui) {
+            event.setCancelled(true);
+            onPlayerSelectClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof SessionBrowserGui gui) {
+            event.setCancelled(true);
+            onSessionBrowserClick(event, gui);
             return;
         }
         if (!(event.getInventory().getHolder() instanceof EventBrowserGui gui)) {
@@ -133,9 +151,9 @@ public final class GuiListener implements Listener {
                     player.sendMessage(Component.text("⏸ Pausiert"));
                 }
             }
-            case TIMELINE -> player.sendMessage(session.statusLine());
+            case TIMELINE -> openPlaybackControl(player, session);
             case EVENTS -> openEventBrowser(player, session);
-            case FOLLOW -> cycleFollow(player, session);
+            case FOLLOW -> PlayerSelectGui.open(player, session.profiles(), session.followedPlayer());
             case CAMERA -> toggleFreecam(player);
             case ROUTES -> {
                 if (routes.markerCount() > 0) {
@@ -165,23 +183,171 @@ public final class GuiListener implements Listener {
         }
     }
 
-    private void cycleFollow(Player player, PlaybackSession session) {
-        var indexes = session.profiles().keySet().stream().sorted().toList();
-        if (indexes.isEmpty()) {
+    /** Opens the fancy playback control panel (play/pause, skip, speed, follow, …). */
+    public void openPlaybackControl(Player player, PlaybackSession session) {
+        PlaybackControlGui.open(player, plugin, session);
+    }
+
+    // --- session browser GUI ---
+
+    /**
+     * Loads every stored session (async DB read) and opens the browser on the main
+     * thread. Used both for the initial open and the in-GUI refresh button.
+     */
+    public void openSessionBrowser(Player player) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            List<SessionRecord> sessions;
+            try {
+                sessions = storage.listSessions(500);
+            } catch (SQLException e) {
+                plugin.getLogger().log(Level.WARNING, "Session browser failed", e);
+                Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
+                        Component.text("Sessions konnten nicht geladen werden.")));
+                return;
+            }
+            Bukkit.getScheduler().runTask(plugin, () -> SessionBrowserGui.open(player, sessions, 0));
+        });
+    }
+
+    private void onSessionBrowserClick(InventoryClickEvent event, SessionBrowserGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
             return;
         }
-        Integer current = session.followedPlayer();
-        int position = current == null ? -1 : indexes.indexOf(current);
-        if (position + 1 >= indexes.size()) {
+        int slot = event.getRawSlot();
+        if (slot == 45 && gui.page() > 0) {
+            SessionBrowserGui.open(player, gui.sessions(), gui.page() - 1);
+            return;
+        }
+        if (slot == 53) {
+            SessionBrowserGui.open(player, gui.sessions(), gui.page() + 1);
+            return;
+        }
+        if (slot == 47) {
+            openSessionBrowser(player);
+            return;
+        }
+        if (slot == 49) {
+            player.closeInventory();
+            return;
+        }
+        SessionRecord record = gui.sessionAt(slot);
+        if (record == null) {
+            return;
+        }
+        if (!player.hasPermission("extendedreplay.playback")) {
+            player.sendMessage(Component.text("Keine Berechtigung zum Laden von Sessions."));
+            return;
+        }
+        if (!record.isFinished()) {
+            player.closeInventory();
+            var live = plugin.liveMirror();
+            if (live == null) {
+                player.sendMessage(Component.text("Live-Mirror ist auf diesem Server nicht verfügbar."));
+                return;
+            }
+            live.join(player, record.sessionId());
+            return;
+        }
+        player.closeInventory();
+        player.sendMessage(Component.text("Lade Session " + record.name() + "…"));
+        playback.open(record.sessionId(), player).whenComplete((session, error) -> {
+            if (error != null) {
+                Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
+                        Component.text("Konnte Session nicht öffnen: " + error.getMessage())));
+            }
+        });
+    }
+
+    // --- playback control GUI ---
+
+    private void onPlaybackControlClick(InventoryClickEvent event, PlaybackControlGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        PlaybackControlGui.Action action = gui.actionOf(event.getCurrentItem());
+        if (action == null) {
+            return;
+        }
+        PlaybackSession session = playback.sessionOf(player).orElse(null);
+        if (session == null) {
+            player.sendMessage(Component.text("Keine aktive Playback-Session."));
+            player.closeInventory();
+            return;
+        }
+        if (action.speedValue() != null) {
+            session.setSpeed(action.speedValue());
+            player.sendMessage(Component.text("Geschwindigkeit: " + session.speed() + "x"));
+            openPlaybackControl(player, session);
+            return;
+        }
+        switch (action) {
+            case REWIND_MINUTE -> {
+                session.seek(Math.max(0, session.currentTick() - 20 * 60));
+                openPlaybackControl(player, session);
+            }
+            case REWIND_10S -> {
+                session.seek(Math.max(0, session.currentTick() - 20 * 10));
+                openPlaybackControl(player, session);
+            }
+            case FORWARD_10S -> {
+                session.seek(session.currentTick() + 20 * 10);
+                openPlaybackControl(player, session);
+            }
+            case FORWARD_MINUTE -> {
+                session.seek(session.currentTick() + 20 * 60);
+                openPlaybackControl(player, session);
+            }
+            case PLAY_PAUSE -> {
+                if (session.isPaused()) {
+                    session.play();
+                } else {
+                    session.pause();
+                }
+                openPlaybackControl(player, session);
+            }
+            case JUMP_EVENT -> openEventBrowser(player, session);
+            case FOLLOW -> PlayerSelectGui.open(player, session.profiles(), session.followedPlayer());
+            case FREECAM -> {
+                player.closeInventory();
+                toggleFreecam(player);
+            }
+            case CLOSE -> {
+                player.closeInventory();
+                playback.detachViewer(player);
+                player.sendMessage(Component.text("Playback geschlossen."));
+            }
+            default -> { }
+        }
+    }
+
+    // --- follow / player select GUI ---
+
+    private void onPlayerSelectClick(InventoryClickEvent event, PlayerSelectGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        PlaybackSession session = playback.sessionOf(player).orElse(null);
+        if (session == null) {
+            player.sendMessage(Component.text("Keine aktive Playback-Session."));
+            player.closeInventory();
+            return;
+        }
+        int slot = event.getRawSlot();
+        if (gui.isStopSlot(slot)) {
             session.follow(null);
             player.sendMessage(Component.text("Folgen beendet."));
-        } else {
-            Integer next = indexes.get(position + 1);
-            session.follow(next);
-            String name = session.profiles().get(next) != null
-                    ? session.profiles().get(next).name() : ("#" + next);
-            player.sendMessage(Component.text("Folge " + name));
+            openPlaybackControl(player, session);
+            return;
         }
+        Integer index = gui.playerIndexAt(slot);
+        if (index == null) {
+            return;
+        }
+        session.follow(index);
+        String name = session.profiles().get(index) != null
+                ? session.profiles().get(index).name() : ("#" + index);
+        player.sendMessage(Component.text("Folge " + name));
+        openPlaybackControl(player, session);
     }
 
     private void toggleFreecam(Player player) {

@@ -2,6 +2,7 @@ package dev.raindancer118.extendedreplay.paper.gui;
 
 import dev.raindancer118.extendedreplay.core.model.ContainerSnapshot;
 import dev.raindancer118.extendedreplay.core.model.InventorySnapshot;
+import dev.raindancer118.extendedreplay.core.model.PlayerProfileData;
 import dev.raindancer118.extendedreplay.paper.replay.PlaybackSession;
 import dev.raindancer118.extendedreplay.paper.util.ItemBytes;
 import net.kyori.adventure.text.Component;
@@ -33,7 +34,7 @@ public final class InventoryInspectGui implements InventoryHolder {
     }
 
     public static void openPlayerInventory(Player viewer, String playerName,
-                                           InventorySnapshot snapshot) {
+                                           InventorySnapshot snapshot, PlayerProfileData profile) {
         ItemStack[] gui = new ItemStack[54];
         // main inventory 9..35 → rows 1-3
         for (int i = 9; i <= 35 && i < snapshot.slots().length; i++) {
@@ -48,6 +49,8 @@ public final class InventoryInspectGui implements InventoryHolder {
             gui[36 + (i - 36)] = ItemBytes.deserialize(snapshot.slots()[i]);
         }
         gui[44] = ItemBytes.deserialize(snapshot.cursor());
+        // real skin of the inspected player, if one was captured
+        gui[45] = profile != null ? Heads.playerHead(profile) : null;
         gui[49] = infoItem(List.of(
                 "Spieler: " + playerName,
                 "Zeit: " + PlaybackSession.formatTicks(snapshot.tick()),
