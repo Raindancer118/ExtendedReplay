@@ -26,3 +26,9 @@ Thumbs.db
 
 ## Local env
 .env
+
+## Tools
+.serena/
+
+## Interne Projekt-Doku
+Project.md
