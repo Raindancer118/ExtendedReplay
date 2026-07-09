@@ -18,6 +18,7 @@ import dev.raindancer118.extendedreplay.transport.ReplayTransport;
 import com.destroystokyo.paper.profile.ProfileProperty;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
@@ -152,6 +153,22 @@ public final class ProducerManager {
         offer(new ReplayPacket.SessionEnd(session.sessionId(), session.currentTick(), reason.name()));
         entityTracker.sessionEnded(session.sessionId());
         plugin.getLogger().info("Recording session '" + session.name() + "' ended: " + reason);
+    }
+
+    /**
+     * Ends a session and starts visible transfer-progress feedback for whoever triggered
+     * it: a boss bar for a player, chat/log lines for console or other command senders.
+     * Feedback only makes sense when a session actually ended and there is a transport
+     * that could still be catching up, so this overload is reserved for command-triggered
+     * stops — the plain {@link #endSession} (also used for shutdown) stays silent.
+     */
+    public void endSession(UUID sessionId, ReplaySessionEndReason reason, CommandSender feedbackTarget) {
+        ActiveSession session = sessionsById.get(sessionId); // peek before it gets removed
+        String name = session != null ? session.name() : sessionId.toString();
+        endSession(sessionId, reason);
+        if (feedbackTarget != null) {
+            new TransferProgressWatcher(plugin, this, name, feedbackTarget).start();
+        }
     }
 
     public Optional<ActiveSession> sessionForWorld(String worldName) {

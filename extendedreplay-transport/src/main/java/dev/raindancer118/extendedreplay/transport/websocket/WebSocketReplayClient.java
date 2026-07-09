@@ -46,6 +46,7 @@ public final class WebSocketReplayClient implements ReplayTransport {
 
     private final ConcurrentLinkedQueue<ReplayPacket> outbound = new ConcurrentLinkedQueue<>();
     private final AtomicLong outboundSize = new AtomicLong();
+    private final AtomicLong spooledPacketCount = new AtomicLong();
     private final ScheduledExecutorService sender;
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicBoolean handshakeAccepted = new AtomicBoolean();
@@ -100,12 +101,18 @@ public final class WebSocketReplayClient implements ReplayTransport {
             if (connected && spool.hasData()) {
                 try {
                     InnerClient current = client;
+                    long[] flushedPackets = {0};
                     spool.drainTo(bytes -> {
                         if (current != null && current.isOpen()) {
                             current.send(bytes);
                             metrics.addTransportBatch(bytes.length);
+                            flushedPackets[0] += countPackets(bytes);
                         }
                     });
+                    // subtract only what we know actually went out; if the connection
+                    // dropped mid-flush the remainder stays counted as pending even
+                    // though the spool file itself was truncated (best-effort accounting)
+                    spooledPacketCount.updateAndGet(current2 -> Math.max(0, current2 - flushedPackets[0]));
                     logger.info("[ExtendedReplay] Spooled replay data flushed to replay server.");
                 } catch (IOException e) {
                     logger.log(Level.WARNING, "[ExtendedReplay] Failed to flush spool", e);
@@ -122,9 +129,19 @@ public final class WebSocketReplayClient implements ReplayTransport {
                 metrics.addTransportBatch(encoded.length);
             } else {
                 spool.append(encoded);
+                spooledPacketCount.addAndGet(batch.size());
             }
         } catch (Exception e) {
             logger.log(Level.WARNING, "[ExtendedReplay] Transport pump error", e);
+        }
+    }
+
+    /** Best-effort packet count of an encoded batch, used only for pending-count accounting. */
+    private int countPackets(byte[] encodedBatch) {
+        try {
+            return PacketBatch.decode(encodedBatch).size();
+        } catch (IOException e) {
+            return 0;
         }
     }
 
@@ -192,7 +209,24 @@ public final class WebSocketReplayClient implements ReplayTransport {
         map.put("outbound-queue", Long.toString(outboundSize.get()));
         map.put("spool-bytes", Long.toString(spool.bytesWritten()));
         map.put("spool-dropped-batches", Long.toString(spool.batchesDropped()));
+        map.put("pending-packets", Integer.toString(pendingCount()));
         return map;
+    }
+
+    /**
+     * Outbound queue size plus whatever is still spooled to disk. When the spool file
+     * has bytes but our in-memory counter lost track of the exact figure (e.g. right
+     * after a restart, when the spool held data from a previous process run), this
+     * still reports at least 1 so {@link #isDrained()} correctly stays {@code false}.
+     */
+    @Override
+    public int pendingCount() {
+        long spooled = spooledPacketCount.get();
+        if (spooled <= 0 && spool.hasData()) {
+            spooled = 1;
+        }
+        long total = outboundSize.get() + spooled;
+        return total > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) total;
     }
 
     @Override

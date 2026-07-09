@@ -8,6 +8,7 @@ import dev.raindancer118.extendedreplay.paper.gui.InventoryInspectGui;
 import dev.raindancer118.extendedreplay.paper.producer.ActiveSession;
 import dev.raindancer118.extendedreplay.paper.replay.PlaybackSession;
 import dev.raindancer118.extendedreplay.paper.replay.route.RouteManager;
+import dev.raindancer118.extendedreplay.paper.util.Errors;
 import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -30,7 +31,14 @@ import java.util.logging.Level;
  */
 public final class ErpCommand implements TabExecutor {
 
+    private static final long SESSION_NAME_CACHE_MILLIS = 5_000L;
+
     private final ExtendedReplayPlugin plugin;
+
+    // tab-completion cache: onTabComplete runs on the main thread, so a plain volatile
+    // field (no locking) is enough — a stale read just means one extra DB hit at worst.
+    private volatile List<String> sessionNameCache = List.of();
+    private volatile long sessionNameCacheAtMillis;
 
     public ErpCommand(ExtendedReplayPlugin plugin) {
         this.plugin = plugin;
@@ -93,7 +101,7 @@ public final class ErpCommand implements TabExecutor {
             };
         } catch (Exception e) {
             plugin.getLogger().log(Level.WARNING, "/erp command failed", e);
-            send(sender, "Fehler: " + e.getMessage());
+            send(sender, "Fehler: " + Errors.describe(e));
             return true;
         }
     }
@@ -128,6 +136,10 @@ public final class ErpCommand implements TabExecutor {
                     + " (dropped cosmetic: " + plugin.producer().queue().droppedCosmetic() + ")");
             plugin.producer().transport().metrics().forEach((key, value) ->
                     send(sender, "  transport." + key + " = " + value));
+            int pending = plugin.producer().queue().size() + plugin.producer().transport().pendingCount();
+            boolean drained = plugin.producer().queue().size() == 0 && plugin.producer().transport().isDrained();
+            send(sender, "Übertragung: " + pending + " Pakete ausstehend"
+                    + (drained ? " · ✔ vollständig übertragen" : ""));
             for (ActiveSession session : plugin.producer().activeSessions()) {
                 send(sender, "Aufnahme: " + session.name() + " @ "
                         + PlaybackSession.formatTicks(session.currentTick())
@@ -210,9 +222,9 @@ public final class ErpCommand implements TabExecutor {
                 return true;
             }
             for (ActiveSession session : active) {
-                plugin.producer().endSession(session.sessionId(), ReplaySessionEndReason.STOPPED);
+                plugin.producer().endSession(session.sessionId(), ReplaySessionEndReason.STOPPED, sender);
             }
-            send(sender, "Aufnahme gestoppt (" + active.size() + " Session(s)).");
+            send(sender, "Aufnahme gestoppt (" + active.size() + " Session(s)) — Übertragung läuft…");
             return true;
         }
         send(sender, "/erp record start <name> | stop");
@@ -239,7 +251,7 @@ public final class ErpCommand implements TabExecutor {
                         + " · " + record.sessionId());
             }
         } catch (Exception e) {
-            send(sender, "Fehler beim Laden: " + e.getMessage());
+            send(sender, "Fehler beim Laden: " + Errors.describe(e));
         }
         return true;
     }
@@ -266,7 +278,7 @@ public final class ErpCommand implements TabExecutor {
             send(sender, "Events: " + plugin.replayServer().storage().listEvents(id, null, 10_000).size()
                     + " · Segmente: " + plugin.replayServer().storage().database().listSegments(id).size());
         } catch (Exception e) {
-            send(sender, "Fehler: " + e.getMessage());
+            send(sender, "Fehler: " + Errors.describe(e));
         }
         return true;
     }
@@ -294,7 +306,7 @@ public final class ErpCommand implements TabExecutor {
         plugin.playback().open(id, player).whenComplete((session, error) -> {
             if (error != null) {
                 Bukkit.getScheduler().runTask(plugin, () ->
-                        send(sender, "Konnte Session nicht öffnen: " + error.getMessage()));
+                        send(sender, "Konnte Session nicht öffnen: " + Errors.describe(error)));
             }
         });
         return true;
@@ -337,7 +349,7 @@ public final class ErpCommand implements TabExecutor {
                                 + PlaybackSession.formatTicks(event.tick()));
                     }, () -> send(sender, "Event nicht gefunden."));
         } catch (Exception e) {
-            send(sender, "Fehler: " + e.getMessage());
+            send(sender, "Fehler: " + Errors.describe(e));
         }
     }
 
@@ -395,7 +407,7 @@ public final class ErpCommand implements TabExecutor {
         plugin.playback().open(id, player).whenComplete((session, error) -> {
             if (error != null) {
                 Bukkit.getScheduler().runTask(plugin, () ->
-                        send(sender, "Konnte Session nicht öffnen: " + error.getMessage()));
+                        send(sender, "Konnte Session nicht öffnen: " + Errors.describe(error)));
             }
         });
         return true;
@@ -449,7 +461,7 @@ public final class ErpCommand implements TabExecutor {
                 send(sender, "Bookmark '" + args[1] + "' gesetzt @ "
                         + PlaybackSession.formatTicks(session.currentTick()));
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
     }
@@ -468,7 +480,7 @@ public final class ErpCommand implements TabExecutor {
                             + entry.getValue());
                 }
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
     }
@@ -527,7 +539,7 @@ public final class ErpCommand implements TabExecutor {
                     default -> send(sender, "/erp scene create|list|open|delete");
                 }
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
     }
@@ -751,7 +763,7 @@ public final class ErpCommand implements TabExecutor {
                 snapshots.create(name, player.getWorld(), x1, y1, z1, x2, y2, z2, player)
                         .whenComplete((sha, error) -> {
                             if (error != null) {
-                                send(sender, "Snapshot fehlgeschlagen: " + error.getMessage());
+                                send(sender, "Snapshot fehlgeschlagen: " + Errors.describe(error));
                             } else {
                                 send(sender, "✔ Snapshot '" + name + "' gespeichert (sha256 "
                                         + sha.substring(0, 16) + "…). Nutzung: /erp record start <session> " + name);
@@ -764,7 +776,7 @@ public final class ErpCommand implements TabExecutor {
                     send(sender, list.isEmpty() ? "Keine Snapshots."
                             : "Snapshots: " + String.join(", ", list));
                 } catch (Exception e) {
-                    send(sender, "Fehler: " + e.getMessage());
+                    send(sender, "Fehler: " + Errors.describe(e));
                 }
             }
             case "info", "verify" -> {
@@ -777,7 +789,7 @@ public final class ErpCommand implements TabExecutor {
                         send(sender, snapshots.describe(args[2]));
                         send(sender, "✔ Datei lesbar, Header und Palette intakt.");
                     } catch (Exception e) {
-                        send(sender, "✘ Snapshot defekt oder fehlt: " + e.getMessage());
+                        send(sender, "✘ Snapshot defekt oder fehlt: " + Errors.describe(e));
                     }
                 });
             }
@@ -794,7 +806,7 @@ public final class ErpCommand implements TabExecutor {
                     snapshots.delete(args[2]);
                     send(sender, "Snapshot gelöscht.");
                 } catch (Exception e) {
-                    send(sender, "Fehler: " + e.getMessage());
+                    send(sender, "Fehler: " + Errors.describe(e));
                 }
             }
             default -> send(sender, "/erp snapshot create|list|info|verify|delete");
@@ -910,7 +922,7 @@ public final class ErpCommand implements TabExecutor {
                 int packets = plugin.replayServer().storage().reindex(finalId);
                 send(sender, "✔ Reindex fertig: " + packets + " Pakete indiziert.");
             } catch (Exception e) {
-                send(sender, "✘ Reindex fehlgeschlagen: " + e.getMessage());
+                send(sender, "✘ Reindex fehlgeschlagen: " + Errors.describe(e));
             }
         });
         return true;
@@ -932,7 +944,7 @@ public final class ErpCommand implements TabExecutor {
                 send(sender, deleted.isEmpty() ? "Nichts zu löschen."
                         : deleted.size() + " Session(s) gelöscht (Favoriten verschont).");
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
         return true;
@@ -959,7 +971,7 @@ public final class ErpCommand implements TabExecutor {
                     problems.forEach(problem -> send(sender, "  " + problem));
                 }
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
         return true;
@@ -985,7 +997,7 @@ public final class ErpCommand implements TabExecutor {
                 plugin.replayServer().storage().deleteSessionData(id);
                 send(sender, "Session gelöscht.");
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
         return true;
@@ -1008,7 +1020,7 @@ public final class ErpCommand implements TabExecutor {
             plugin.replayServer().storage().database().setFavorite(id, !record.favorite());
             send(sender, record.favorite() ? "★ entfernt." : "★ favorisiert.");
         } catch (Exception e) {
-            send(sender, "Fehler: " + e.getMessage());
+            send(sender, "Fehler: " + Errors.describe(e));
         }
         return true;
     }
@@ -1024,7 +1036,7 @@ public final class ErpCommand implements TabExecutor {
                 send(sender, "Speicher: " + (bytes / 1024 / 1024) + " MB · "
                         + count + " Session(s)");
             } catch (Exception e) {
-                send(sender, "Fehler: " + e.getMessage());
+                send(sender, "Fehler: " + Errors.describe(e));
             }
         });
         return true;
@@ -1076,7 +1088,7 @@ public final class ErpCommand implements TabExecutor {
         } catch (NumberFormatException e) {
             send(sender, "Ungültige Zahl.");
         } catch (Exception e) {
-            send(sender, "Fehler: " + e.getMessage());
+            send(sender, "Fehler: " + Errors.describe(e));
         }
         return true;
     }
@@ -1108,9 +1120,36 @@ public final class ErpCommand implements TabExecutor {
             send(sender, matches.isEmpty() ? "Keine Session gefunden: " + input
                     : "Mehrdeutig (" + matches.size() + " Treffer) — bitte UUID nutzen.");
         } catch (Exception e) {
-            send(sender, "Fehler: " + e.getMessage());
+            send(sender, "Fehler: " + Errors.describe(e));
         }
         return null;
+    }
+
+    /**
+     * Names of the ~15 most recent sessions, filtered by the given prefix, for tab
+     * completion. Cached for {@value #SESSION_NAME_CACHE_MILLIS} ms so repeated tab
+     * presses don't hammer the database; a failed lookup falls back to the last known
+     * (possibly stale) cache instead of showing nothing.
+     */
+    private List<String> recentSessionNames(String prefix) {
+        if (plugin.replayServer() == null) {
+            return List.of();
+        }
+        long now = System.currentTimeMillis();
+        List<String> names = sessionNameCache;
+        if (now - sessionNameCacheAtMillis >= SESSION_NAME_CACHE_MILLIS) {
+            try {
+                names = plugin.replayServer().storage().listSessions(15).stream()
+                        .map(SessionRecord::name)
+                        .toList();
+                sessionNameCache = names;
+                sessionNameCacheAtMillis = now;
+            } catch (Exception ignored) {
+                // keep the stale cache — better a slightly outdated suggestion than none
+            }
+        }
+        String lower = prefix.toLowerCase(Locale.ROOT);
+        return names.stream().filter(name -> name.toLowerCase(Locale.ROOT).startsWith(lower)).toList();
     }
 
     /** Parses "m:ss" or plain seconds into ticks. */
@@ -1164,6 +1203,8 @@ public final class ErpCommand implements TabExecutor {
                 case "snapshot" -> List.of("create", "list", "info", "verify", "delete");
                 case "heatmap" -> List.of("movement", "kills", "deaths", "loot");
                 case "cam" -> List.of("save", "goto", "list", "delete");
+                case "play", "connect", "verify", "session", "delete", "favorite", "reindex" ->
+                        plugin.role().playsBack() ? recentSessionNames(args[1]) : List.of();
                 default -> List.of();
             };
         }

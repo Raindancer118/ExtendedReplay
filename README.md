@@ -200,7 +200,7 @@ transport:
 |-------|----------|
 | **General** | `/erp` · `gui` · `help` · `status` · `test` |
 | **Recording** | `record start [name] [snapshot\|-] [world]` (console needs the world arg or uses the default world) · `record stop` · `sessions` · `session <id>` |
-| **Playback** | `play <id>` · `pause` · `resume` · `speed <0.25–8>` · `jump <time>` · `rewind <s>` · `forward <s>` · `close` |
+| **Playback** | `play <id>` · `connect <id>` (fresh seed-matched world) · `disconnect`/`close` · `pause` · `resume` · `speed <0.25–8>` · `jump <time>` · `rewind <s>` · `forward <s>` |
 | **Live** | `live` |
 | **Events** | `events` · `event <id>` · `jump event <id>` · `bookmark <name>` · `bookmarks` |
 | **Scenes** | `scene create <name>` · `scene list` · `scene open <name>` · `scene delete <name>` |
@@ -214,6 +214,14 @@ transport:
 
 Moderators in a replay session also get a **hotbar control UI** — play/pause, timeline,
 event browser, player follow, camera, routes, inspection, speed and exit on slots 1–9.
+
+On a dedicated `REPLAY` server, viewers are greeted with a **lobby hotbar** on join
+(session browser, live mirror, replay the latest session, help), `/erp gui` opens a
+paginated **session browser** — one click loads a recording into a fresh world generated
+with the original arena's seed — and during playback it opens a full **control panel**
+(play/pause, skip ±10s/±1min, speed presets, jump-to-event, follow with real player
+skins). Natural mob spawning is disabled on replay servers; replayed entities are
+unaffected.
 
 ---
 

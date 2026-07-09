@@ -42,6 +42,12 @@ public final class LocalLoopbackTransport implements ReplayTransport {
         return Map.of("type", "loopback", "delivered", Long.toString(delivered));
     }
 
+    /** Delivery is synchronous in {@link #send}, so nothing is ever left pending. */
+    @Override
+    public int pendingCount() {
+        return 0;
+    }
+
     @Override
     public void close() {
         started = false;

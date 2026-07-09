@@ -63,15 +63,17 @@ public final class LiveMirrorManager {
     private WorldStateApplier blockApplier;
     private BukkitTask tickTask;
     private volatile boolean sessionEnded;
+    private final boolean replayLobbyMode;
 
     public LiveMirrorManager(Plugin plugin, ReplayConfig config,
                              ReplayServerManager replayServer, SnapshotService snapshots,
-                             HotbarUI hotbar) {
+                             HotbarUI hotbar, boolean replayLobbyMode) {
         this.plugin = plugin;
         this.config = config;
         this.replayServer = replayServer;
         this.snapshots = snapshots;
         this.hotbar = hotbar;
+        this.replayLobbyMode = replayLobbyMode;
     }
 
     public boolean isActive() {
@@ -242,12 +244,20 @@ public final class LiveMirrorManager {
 
     private void restoreViewer(Player viewer) {
         org.bukkit.inventory.ItemStack[] saved = savedInventories.remove(viewer.getUniqueId());
-        if (saved != null) {
-            viewer.getInventory().setContents(saved);
-        }
         GameMode previous = savedGameModes.remove(viewer.getUniqueId());
-        if (previous != null) {
-            viewer.setGameMode(previous);
+        if (replayLobbyMode) {
+            // dedicated replay server: back to the lobby hotbar, not whatever was saved
+            viewer.setGameMode(GameMode.ADVENTURE);
+            viewer.setAllowFlight(true);
+            viewer.setFlying(true);
+            hotbar.giveLobby(viewer);
+        } else {
+            if (saved != null) {
+                viewer.getInventory().setContents(saved);
+            }
+            if (previous != null) {
+                viewer.setGameMode(previous);
+            }
         }
         viewer.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
     }

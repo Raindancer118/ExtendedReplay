@@ -89,11 +89,15 @@ class TransportRoundtripTest {
         LocalLoopbackTransport transport = new LocalLoopbackTransport(received::add);
         transport.send(framePacket(1)); // before start: dropped
         transport.start();
+        assertThat(transport.pendingCount()).isEqualTo(0);
+        assertThat(transport.isDrained()).isTrue();
         transport.send(framePacket(2));
         transport.close();
         transport.send(framePacket(3)); // after close: dropped
         assertThat(received).hasSize(1);
         assertThat(received.get(0).tick()).isEqualTo(2);
+        assertThat(transport.pendingCount()).isEqualTo(0);
+        assertThat(transport.isDrained()).isFalse(); // closed: not connected anymore
     }
 
     @Test
@@ -168,6 +172,8 @@ class TransportRoundtripTest {
         // give the pump time to spool while no server is listening
         Thread.sleep(500);
         assertThat(client.metrics().get("connected")).isEqualTo("false");
+        assertThat(client.pendingCount()).isGreaterThan(0);
+        assertThat(client.isDrained()).isFalse();
 
         ConcurrentLinkedQueue<ReplayPacket> received = new ConcurrentLinkedQueue<>();
         CountDownLatch gotFrames = new CountDownLatch(2);
@@ -182,6 +188,15 @@ class TransportRoundtripTest {
         try {
             assertThat(gotFrames.await(40, TimeUnit.SECONDS))
                     .as("spooled frames should be delivered after reconnect").isTrue();
+            // pump() runs on its own schedule; give it a couple more cycles to clear
+            // the spool counter and report connected+drained after the flush above
+            long deadline = System.currentTimeMillis() + 5000;
+            while (!client.isDrained() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            assertThat(client.isDrained())
+                    .as("nothing should remain pending once the spool was flushed").isTrue();
+            assertThat(client.pendingCount()).isEqualTo(0);
         } finally {
             client.close();
             server.stop(1000);
