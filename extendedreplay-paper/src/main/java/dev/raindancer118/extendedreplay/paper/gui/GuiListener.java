@@ -16,6 +16,7 @@ import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
@@ -48,7 +49,6 @@ public final class GuiListener implements Listener {
     private final dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes;
     private final ProducerManager producer;
     private final RecordingStarter recordingStarter;
-    private static final double[] SPEED_STEPS = PlaybackControlGui.SPEED_STEPS;
 
     /**
      * @param playback         null on a pure PRODUCER server (no local playback)
@@ -100,6 +100,21 @@ public final class GuiListener implements Listener {
         if (event.getInventory().getHolder() instanceof SessionBrowserGui gui) {
             event.setCancelled(true);
             onSessionBrowserClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof ContainerSelectGui gui) {
+            event.setCancelled(true);
+            onContainerSelectClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof SpeedSelectGui gui) {
+            event.setCancelled(true);
+            onSpeedSelectClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof ConfirmGui gui) {
+            event.setCancelled(true);
+            onConfirmClick(event, gui);
             return;
         }
         if (event.getInventory().getHolder() instanceof RecordControlGui gui) {
@@ -205,15 +220,35 @@ public final class GuiListener implements Listener {
             var live = plugin.liveMirror();
             if (live != null && live.isViewer(player)) {
                 switch (action) {
-                    case EXIT -> live.leave(player);
                     case CAMERA -> toggleFreecam(player);
+                    case MENU -> {
+                        if (player.isSneaking()) {
+                            live.leave(player);
+                        } else {
+                            player.sendMessage(Component.text(
+                                    "Im Live-Mirror verfügbar: Freecam (Auge), Menü mit Shift-Klick verlassen."));
+                        }
+                    }
                     default -> player.sendMessage(Component.text(
-                            "Im Live-Mirror verfügbar: Freecam (Auge), Verlassen (Barriere)."));
+                            "Im Live-Mirror verfügbar: Freecam (Auge), Menü mit Shift-Klick verlassen."));
                 }
             }
             return;
         }
+        boolean sneaking = player.isSneaking();
         switch (action) {
+            case PREV_EVENT -> playback.jumpToAdjacentEvent(player, session, -1);
+            case NEXT_EVENT -> playback.jumpToAdjacentEvent(player, session, 1);
+            case REWIND -> {
+                int delta = sneaking ? 1200 : 200; // 60s / 10s at 20 ticks/s
+                session.seek(Math.max(0, session.currentTick() - delta));
+                hotbar.refresh(player, session.isPaused(), session.speed());
+            }
+            case FAST_FORWARD -> {
+                int delta = sneaking ? 1200 : 200;
+                session.seek(session.currentTick() + delta);
+                hotbar.refresh(player, session.isPaused(), session.speed());
+            }
             case PLAY_PAUSE -> {
                 if (session.isPaused()) {
                     session.play();
@@ -222,23 +257,18 @@ public final class GuiListener implements Listener {
                     session.pause();
                     player.sendMessage(Component.text("⏸ Pausiert"));
                 }
+                hotbar.refresh(player, session.isPaused(), session.speed());
             }
-            case TIMELINE -> openPlaybackControl(player, session);
-            case EVENTS -> openEventBrowser(player, session);
-            case FOLLOW -> PlayerSelectGui.open(player, session.profiles(), session.followedPlayer());
+            case SPEED -> SpeedSelectGui.open(player, plugin, session);
+            case PLAYERS -> PlayerSelectGui.open(player, session.profiles(), session.followedPlayer());
             case CAMERA -> toggleFreecam(player);
-            case ROUTES -> {
-                if (routes.markerCount() > 0) {
-                    routes.clear(player);
+            case MENU -> {
+                if (sneaking) {
+                    playback.detachViewer(player);
                 } else {
-                    routes.render(player, session, java.util.List.of(), 0,
-                            session.lastTickOfSession());
+                    openPlaybackControl(player, session);
                 }
             }
-            case INSPECT -> player.sendMessage(Component.text(
-                    "Nutze /erp inventory <spieler> oder /erp container <x> <y> <z>"));
-            case SPEED -> cycleSpeed(player, session);
-            case EXIT -> playback.detachViewer(player);
         }
     }
 
@@ -530,19 +560,142 @@ public final class GuiListener implements Listener {
         int slot = event.getRawSlot();
         if (gui.isStopSlot(slot)) {
             session.follow(null);
-            player.sendMessage(Component.text("Folgen beendet."));
+            session.pov(null);
+            player.sendMessage(Component.text("Folgen/POV beendet."));
             openPlaybackControl(player, session);
+            return;
+        }
+        if (gui.isContainerSlot(slot)) {
+            ContainerSelectGui.open(player, session, 0);
             return;
         }
         Integer index = gui.playerIndexAt(slot);
         if (index == null) {
             return;
         }
-        session.follow(index);
-        String name = session.profiles().get(index) != null
-                ? session.profiles().get(index).name() : ("#" + index);
-        player.sendMessage(Component.text("Folge " + name));
-        openPlaybackControl(player, session);
+        var profile = session.profiles().get(index);
+        String name = profile != null ? profile.name() : ("#" + index);
+        switch (event.getClick()) {
+            case LEFT -> {
+                session.follow(index);
+                player.sendMessage(Component.text("Folge " + name));
+                openPlaybackControl(player, session);
+            }
+            case RIGHT -> {
+                session.pov(index);
+                player.closeInventory();
+                player.sendMessage(Component.text("POV: " + name
+                        + " (beenden: erneut Spieler-GUI → Folgen beenden)"));
+            }
+            case SHIFT_LEFT -> {
+                player.closeInventory();
+                Location location = session.actorLocation(index);
+                if (location == null) {
+                    player.sendMessage(Component.text("Kein Standort für " + name + " verfügbar."));
+                } else {
+                    player.teleport(location.clone().add(0, 2, 0));
+                    player.sendMessage(Component.text("Zu " + name + " teleportiert."));
+                }
+            }
+            case SHIFT_RIGHT -> {
+                player.closeInventory();
+                InventoryInspectGui.openPlayerInventory(player, session, index);
+            }
+            default -> { }
+        }
+    }
+
+    // --- container select GUI ---
+
+    private void onContainerSelectClick(InventoryClickEvent event, ContainerSelectGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        int slot = event.getRawSlot();
+        if (slot == 49) {
+            player.closeInventory();
+            return;
+        }
+        PlaybackSession session = playback.sessionOf(player).orElse(null);
+        if (slot == 45 && gui.page() > 0) {
+            if (session != null) {
+                ContainerSelectGui.open(player, session, gui.page() - 1);
+            }
+            return;
+        }
+        if (slot == 53) {
+            if (session != null) {
+                ContainerSelectGui.open(player, session, gui.page() + 1);
+            }
+            return;
+        }
+        String containerId = gui.containerIdAt(slot);
+        if (containerId == null) {
+            return;
+        }
+        if (session == null) {
+            player.sendMessage(Component.text("Keine aktive Playback-Session."));
+            player.closeInventory();
+            return;
+        }
+        InventoryInspectGui.openContainer(player, session, containerId);
+    }
+
+    // --- speed select GUI ---
+
+    private void onSpeedSelectClick(InventoryClickEvent event, SpeedSelectGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        PlaybackSession session = playback.sessionOf(player).orElse(null);
+        if (session == null) {
+            player.sendMessage(Component.text("Keine aktive Playback-Session."));
+            player.closeInventory();
+            return;
+        }
+        SpeedSelectGui.Action action = gui.actionOf(event.getCurrentItem());
+        if (action == null) {
+            return;
+        }
+        if (action.speedValue() != null) {
+            session.setSpeed(action.speedValue());
+            player.sendMessage(Component.text("Geschwindigkeit: " + session.speed() + "x"));
+            hotbar.refresh(player, session.isPaused(), session.speed());
+            SpeedSelectGui.open(player, plugin, session); // reopen so the active marker moves
+            return;
+        }
+        switch (action) {
+            case TICK_BACK -> {
+                session.pause();
+                session.stepTicks(-1);
+                player.sendMessage(Component.text("Tick " + session.currentTick()));
+                hotbar.refresh(player, session.isPaused(), session.speed());
+            }
+            case TICK_FORWARD -> {
+                session.pause();
+                session.stepTicks(1);
+                player.sendMessage(Component.text("Tick " + session.currentTick()));
+                hotbar.refresh(player, session.isPaused(), session.speed());
+            }
+            case CLOSE -> player.closeInventory();
+            default -> { }
+        }
+    }
+
+    // --- confirm GUI ---
+
+    private void onConfirmClick(InventoryClickEvent event, ConfirmGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        int slot = event.getRawSlot();
+        if (gui.isConfirmSlot(slot)) {
+            player.closeInventory();
+            gui.runConfirm();
+        } else if (gui.isCancelSlot(slot)) {
+            player.closeInventory();
+            gui.runCancel();
+        }
     }
 
     private void toggleFreecam(Player player) {
@@ -551,25 +704,18 @@ public final class GuiListener implements Listener {
             player.setAllowFlight(true);
             player.setFlying(true);
             hotbar.give(player);
+            // give() resets slots 2/5 to the (paused, 1x) default — sync them back to the
+            // real session state right away instead of waiting for the next HUD tick
+            if (playback != null) {
+                playback.sessionOf(player).ifPresent(session ->
+                        hotbar.refresh(player, session.isPaused(), session.speed()));
+            }
             player.sendMessage(Component.text("Freecam aus — Hotbar wieder aktiv."));
         } else {
             player.setGameMode(GameMode.SPECTATOR);
             player.sendMessage(Component.text(
                     "Freecam an (Spectator). Nochmal nutzen: /erp freecam"));
         }
-    }
-
-    private void cycleSpeed(Player player, PlaybackSession session) {
-        double current = session.speed();
-        int index = 0;
-        for (int i = 0; i < SPEED_STEPS.length; i++) {
-            if (Math.abs(SPEED_STEPS[i] - current) < 0.01) {
-                index = (i + 1) % SPEED_STEPS.length;
-                break;
-            }
-        }
-        session.setSpeed(SPEED_STEPS[index]);
-        player.sendMessage(Component.text("Geschwindigkeit: " + SPEED_STEPS[index] + "x"));
     }
 
     @EventHandler

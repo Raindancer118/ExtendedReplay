@@ -1,8 +1,6 @@
 package dev.raindancer118.extendedreplay.paper.command;
 
 import dev.raindancer118.extendedreplay.api.ReplaySessionEndReason;
-import dev.raindancer118.extendedreplay.core.model.ContainerSnapshot;
-import dev.raindancer118.extendedreplay.core.model.InventorySnapshot;
 import dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin;
 import dev.raindancer118.extendedreplay.paper.gui.InventoryInspectGui;
 import dev.raindancer118.extendedreplay.paper.producer.ActiveSession;
@@ -589,14 +587,7 @@ public final class ErpCommand implements TabExecutor {
                 send(sender, "Spieler nicht in der Aufnahme: " + args[1]);
                 return;
             }
-            InventorySnapshot snapshot = session.inventoryAt(index, session.currentTick());
-            if (snapshot == null) {
-                send(sender, "Kein Inventar-Snapshot bis "
-                        + PlaybackSession.formatTicks(session.currentTick()));
-                return;
-            }
-            InventoryInspectGui.openPlayerInventory(player, args[1], snapshot,
-                    session.profiles().get(index));
+            InventoryInspectGui.openPlayerInventory(player, session, index);
         });
     }
 
@@ -615,20 +606,19 @@ public final class ErpCommand implements TabExecutor {
             int x = Integer.parseInt(args[1]);
             int y = Integer.parseInt(args[2]);
             int z = Integer.parseInt(args[3]);
-            ContainerSnapshot snapshot = null;
+            String containerId = null;
             // container ids are recorded with the original world name — try all known ids
-            for (String containerId : session.allContainers().keySet()) {
-                if (containerId.endsWith(":" + x + "," + y + "," + z)) {
-                    snapshot = session.containerAt(containerId, session.currentTick());
+            for (String id : session.allContainers().keySet()) {
+                if (id.endsWith(":" + x + "," + y + "," + z)) {
+                    containerId = id;
                     break;
                 }
             }
-            if (snapshot == null) {
-                send(sender, "Kein Container-Snapshot an " + x + "/" + y + "/" + z
-                        + " bis " + PlaybackSession.formatTicks(session.currentTick()));
+            if (containerId == null) {
+                send(sender, "Kein Container bekannt an " + x + "/" + y + "/" + z);
                 return;
             }
-            InventoryInspectGui.openContainer(player, snapshot);
+            InventoryInspectGui.openContainer(player, session, containerId);
         });
     }
 

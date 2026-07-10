@@ -101,7 +101,19 @@ public final class PlaybackManager {
             Player viewer = Bukkit.getPlayer(viewerId);
             if (viewer != null) {
                 hud.update(viewer, session);
+                hotbar.refresh(viewer, session.isPaused(), session.speed());
+                refreshOpenInspectGui(viewer, session);
             }
+        }
+    }
+
+    /** Live-updates an open {@link dev.raindancer118.extendedreplay.paper.gui.InventoryInspectGui}
+     * so an inventory/container view stays in sync with the running playback instead of
+     * freezing at the tick it was opened at. */
+    private void refreshOpenInspectGui(Player viewer, PlaybackSession session) {
+        if (viewer.getOpenInventory().getTopInventory().getHolder()
+                instanceof dev.raindancer118.extendedreplay.paper.gui.InventoryInspectGui gui) {
+            gui.refresh(session);
         }
     }
 
@@ -302,6 +314,7 @@ public final class PlaybackManager {
         viewer.setAllowFlight(true);
         viewer.setFlying(true);
         hotbar.give(viewer);
+        hotbar.refresh(viewer, session.isPaused(), session.speed());
 
         Location start = firstActorLocation(session);
         // async: the target chunks of a freshly created seeded world may not exist yet

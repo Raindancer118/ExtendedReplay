@@ -9,6 +9,11 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 /**
  * Moderator hotbar while inside a playback session. Items are tagged with a PDC key so
  * the listener can dispatch clicks; the original inventory is not touched because
@@ -20,7 +25,7 @@ import org.bukkit.plugin.Plugin;
 public final class HotbarUI {
 
     public enum Action {
-        PLAY_PAUSE, TIMELINE, EVENTS, FOLLOW, CAMERA, ROUTES, INSPECT, SPEED, EXIT
+        PREV_EVENT, REWIND, PLAY_PAUSE, FAST_FORWARD, NEXT_EVENT, SPEED, PLAYERS, CAMERA, MENU
     }
 
     /** Actions of the REPLAY server's lobby hotbar (no active playback/mirror). */
@@ -28,8 +33,14 @@ public final class HotbarUI {
         BROWSE_SESSIONS, LIVE_MIRROR, PLAY_LAST, HELP
     }
 
+    /** Snapshot of the dynamic hotbar state (play/pause + speed) last rendered to a
+     * viewer — used to skip redundant {@code setItem} calls in {@link #refresh}. */
+    private record RenderedState(boolean paused, double speed) {
+    }
+
     private final NamespacedKey key;
     private final NamespacedKey lobbyKey;
+    private final Map<UUID, RenderedState> renderedStates = new HashMap<>();
 
     public HotbarUI(Plugin plugin) {
         this.key = new NamespacedKey(plugin, "erp-hotbar-action");
@@ -43,19 +54,63 @@ public final class HotbarUI {
     public void give(Player viewer) {
         var inventory = viewer.getInventory();
         inventory.clear();
-        inventory.setItem(0, taggedItem(Material.LIME_DYE, "▶ Play / Pause", key, Action.PLAY_PAUSE.name()));
-        inventory.setItem(1, taggedItem(Material.CLOCK, "🕐 Wiedergabe-Steuerung", key, Action.TIMELINE.name()));
-        inventory.setItem(2, taggedItem(Material.BOOK, "📅 Event-Browser", key, Action.EVENTS.name()));
-        inventory.setItem(3, taggedItem(Material.PLAYER_HEAD, "👤 Spieler folgen", key, Action.FOLLOW.name()));
-        inventory.setItem(4, taggedItem(Material.ENDER_EYE, "🎥 Freecam", key, Action.CAMERA.name()));
-        inventory.setItem(5, taggedItem(Material.RED_CARPET, "🗺 Routen", key, Action.ROUTES.name()));
-        inventory.setItem(6, taggedItem(Material.CHEST, "🎒 Inspektion", key, Action.INSPECT.name()));
-        inventory.setItem(7, taggedItem(Material.SUGAR, "⚡ Geschwindigkeit", key, Action.SPEED.name()));
-        inventory.setItem(8, taggedItem(Material.BARRIER, "✖ Verlassen", key, Action.EXIT.name()));
+        inventory.setItem(0, taggedItem(Material.SPECTRAL_ARROW, "⏮ Vorheriges Event",
+                List.of(), key, Action.PREV_EVENT.name()));
+        inventory.setItem(1, taggedItem(Material.ARROW, "« Zurückspulen (10s / Shift: 60s)",
+                List.of(), key, Action.REWIND.name()));
+        inventory.setItem(2, playPauseItem(true));
+        inventory.setItem(3, taggedItem(Material.ARROW, "Vorspulen (10s / Shift: 60s) »",
+                List.of(), key, Action.FAST_FORWARD.name()));
+        inventory.setItem(4, taggedItem(Material.SPECTRAL_ARROW, "⏭ Nächstes Event",
+                List.of(), key, Action.NEXT_EVENT.name()));
+        inventory.setItem(5, speedItem(1.0));
+        inventory.setItem(6, taggedItem(Material.PLAYER_HEAD, "👥 Spieler",
+                List.of("Folgen · POV · Teleport · Inventar"), key, Action.PLAYERS.name()));
+        inventory.setItem(7, taggedItem(Material.ENDER_EYE, "🎥 Freecam",
+                List.of(), key, Action.CAMERA.name()));
+        inventory.setItem(8, taggedItem(Material.COMPASS, "☰ Menü",
+                List.of("Klick: Steuerung öffnen", "Shift-Klick: Replay verlassen"),
+                key, Action.MENU.name()));
+        // default state matches what was just rendered (paused, 1x) so the first refresh()
+        // call right after attaching a viewer is a cheap no-op
+        renderedStates.put(viewer.getUniqueId(), new RenderedState(true, 1.0));
     }
 
     public void remove(Player viewer) {
         viewer.getInventory().clear();
+        renderedStates.remove(viewer.getUniqueId());
+    }
+
+    /**
+     * Updates only the dynamic play/pause (slot 2) and speed (slot 5) items in-place, and
+     * only if the viewer's last-rendered state actually changed — cheap enough to call from
+     * every hotbar-affecting action and from the periodic HUD tick.
+     */
+    public void refresh(Player viewer, boolean paused, double speed) {
+        RenderedState next = new RenderedState(paused, speed);
+        RenderedState previous = renderedStates.put(viewer.getUniqueId(), next);
+        if (next.equals(previous)) {
+            return;
+        }
+        viewer.getInventory().setItem(2, playPauseItem(paused));
+        viewer.getInventory().setItem(5, speedItem(speed));
+    }
+
+    private ItemStack playPauseItem(boolean paused) {
+        return taggedItem(paused ? Material.LIME_DYE : Material.ORANGE_DYE,
+                paused ? "▶ Wiedergabe" : "⏸ Pause", List.of(), key, Action.PLAY_PAUSE.name());
+    }
+
+    private ItemStack speedItem(double speed) {
+        ItemStack item = taggedItem(Material.SUGAR, "⚡ Geschwindigkeit: " + formatSpeed(speed) + "x",
+                List.of("Klick: Geschwindigkeit wählen"), key, Action.SPEED.name());
+        int amount = (int) Math.max(1, Math.min(64, Math.round(speed)));
+        item.setAmount(amount);
+        return item;
+    }
+
+    private static String formatSpeed(double speed) {
+        return speed == Math.floor(speed) ? String.valueOf((int) speed) : String.valueOf(speed);
     }
 
     /**
@@ -67,19 +122,27 @@ public final class HotbarUI {
         var inventory = viewer.getInventory();
         inventory.clear();
         inventory.setItem(0, taggedItem(Material.CHEST_MINECART, "📼 Session-Browser",
-                lobbyKey, LobbyAction.BROWSE_SESSIONS.name()));
+                List.of(), lobbyKey, LobbyAction.BROWSE_SESSIONS.name()));
         inventory.setItem(2, taggedItem(Material.ENDER_EYE, "📡 Live-Mirror",
-                lobbyKey, LobbyAction.LIVE_MIRROR.name()));
+                List.of(), lobbyKey, LobbyAction.LIVE_MIRROR.name()));
         inventory.setItem(4, taggedItem(Material.CLOCK, "⏱ Letzte Session abspielen",
-                lobbyKey, LobbyAction.PLAY_LAST.name()));
+                List.of(), lobbyKey, LobbyAction.PLAY_LAST.name()));
         inventory.setItem(8, taggedItem(Material.BOOK, "❓ Hilfe",
-                lobbyKey, LobbyAction.HELP.name()));
+                List.of(), lobbyKey, LobbyAction.HELP.name()));
+        // no playback active in the lobby — drop any stale render-state entry
+        renderedStates.remove(viewer.getUniqueId());
     }
 
-    private ItemStack taggedItem(Material material, String label, NamespacedKey tagKey, String tagValue) {
+    private ItemStack taggedItem(Material material, String label, List<String> lore,
+                                 NamespacedKey tagKey, String tagValue) {
         ItemStack item = new ItemStack(material);
         item.editMeta(meta -> {
             meta.displayName(Component.text(label, NamedTextColor.AQUA));
+            if (!lore.isEmpty()) {
+                meta.lore(lore.stream()
+                        .map(line -> (Component) Component.text(line, NamedTextColor.GRAY))
+                        .toList());
+            }
             meta.getPersistentDataContainer().set(tagKey, PersistentDataType.STRING, tagValue);
         });
         return item;
