@@ -47,7 +47,7 @@ public final class JobManager {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 body.run(job);
-                job.setStatus(job.cancelRequested() ? Job.Status.CANCELLED : Job.Status.COMPLETED);
+                job.setStatus(job.cancelAcknowledged() ? Job.Status.CANCELLED : Job.Status.COMPLETED);
             } catch (Exception e) {
                 job.setStatus(Job.Status.FAILED);
                 job.setMessage(e.getMessage() != null ? e.getMessage() : e.toString());

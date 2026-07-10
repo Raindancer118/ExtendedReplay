@@ -359,6 +359,9 @@ public final class PlaybackManager {
             if (previous != null) {
                 viewer.setGameMode(previous);
             }
+            // no giveLobby()/give() call on this path to drop the cached render state —
+            // forget it explicitly so it doesn't linger in HotbarUI forever
+            hotbar.forgetState(viewer.getUniqueId());
         }
         World mainWorld = Bukkit.getWorlds().get(0);
         viewer.teleport(mainWorld.getSpawnLocation());

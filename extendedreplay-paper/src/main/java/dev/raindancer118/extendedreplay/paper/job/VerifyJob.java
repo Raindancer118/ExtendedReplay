@@ -32,6 +32,7 @@ public final class VerifyJob {
 
             job.setProgress(50);
             if (job.cancelRequested()) {
+                job.acknowledgeCancel();
                 job.setMessage("Abgebrochen.");
                 return;
             }

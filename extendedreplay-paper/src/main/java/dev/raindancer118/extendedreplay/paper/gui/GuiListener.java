@@ -295,16 +295,24 @@ public final class GuiListener implements Listener {
     }
 
     public void openEventBrowser(Player player, PlaybackSession session) {
-        try {
-            var events = storage.listEvents(session.sessionId(), null, 500);
+        UUID sessionId = session.sessionId();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            List<EventRecord> events;
             Map<UUID, String> names = new HashMap<>();
-            storage.listPlayers(session.sessionId()).forEach(profile ->
-                    names.put(profile.uuid(), profile.name()));
-            EventBrowserGui.open(player, events, names, 0);
-        } catch (SQLException e) {
-            plugin.getLogger().log(Level.WARNING, "Event browser failed", e);
-            player.sendMessage(Component.text("Events konnten nicht geladen werden."));
-        }
+            try {
+                events = storage.listEvents(sessionId, null, 500);
+                storage.listPlayers(sessionId).forEach(profile ->
+                        names.put(profile.uuid(), profile.name()));
+            } catch (SQLException e) {
+                plugin.getLogger().log(Level.WARNING, "Event browser failed", e);
+                Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
+                        Component.text("Events konnten nicht geladen werden.")));
+                return;
+            }
+            List<EventRecord> finalEvents = events;
+            Bukkit.getScheduler().runTask(plugin, () ->
+                    EventBrowserGui.open(player, finalEvents, names, 0));
+        });
     }
 
     // --- record control GUI (producer side) ---

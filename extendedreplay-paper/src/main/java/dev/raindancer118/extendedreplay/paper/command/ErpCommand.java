@@ -115,6 +115,10 @@ public final class ErpCommand implements TabExecutor {
         if (!player.hasPermission("extendedreplay.viewer")) {
             return noPermission(sender);
         }
+        if (plugin.guiListener() == null) {
+            send(sender, "ExtendedReplay ist auf diesem Server nicht aktiv.");
+            return true;
+        }
         plugin.guiListener().openControlCenter(player);
         return true;
     }
@@ -1050,6 +1054,10 @@ public final class ErpCommand implements TabExecutor {
      */
     private boolean gui(CommandSender sender) {
         if (sender instanceof Player player) {
+            if (plugin.guiListener() == null) {
+                send(sender, "ExtendedReplay ist auf diesem Server nicht aktiv.");
+                return true;
+            }
             if (plugin.playback() != null) {
                 PlaybackSession session = plugin.playback().sessionOf(player).orElse(null);
                 if (session != null) {

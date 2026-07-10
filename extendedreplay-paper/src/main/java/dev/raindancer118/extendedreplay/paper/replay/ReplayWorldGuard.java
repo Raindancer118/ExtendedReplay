@@ -31,6 +31,7 @@ import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.event.world.StructureGrowEvent;
 
@@ -278,6 +279,13 @@ public final class ReplayWorldGuard implements Listener {
         if (isPlaybackWorld(event.getPlayer().getWorld())) {
             event.setCancelled(true);
         }
+    }
+
+    /** Drops the viewer's cooldown entry so {@link #lastContainerWarning} doesn't keep a
+     * stale record around forever for players who log off. */
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        lastContainerWarning.remove(event.getPlayer().getUniqueId());
     }
 
     private void warnContainerBlocked(Player player) {

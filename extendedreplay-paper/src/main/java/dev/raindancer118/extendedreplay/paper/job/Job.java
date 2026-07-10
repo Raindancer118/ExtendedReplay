@@ -25,6 +25,7 @@ public final class Job {
     private volatile String message = "";
     private volatile long finishedAtMillis;
     private volatile boolean cancelRequested;
+    private volatile boolean cancelAcknowledged;
 
     Job(int id, String name, String detail) {
         this.id = id;
@@ -72,6 +73,26 @@ public final class Job {
     /** Marks the job for cooperative cancellation; the job body decides when/whether to honor it. */
     public void requestCancel() {
         this.cancelRequested = true;
+    }
+
+    /**
+     * Whether the job body actually stopped early because of a cancellation request (as
+     * opposed to merely having one pending while it ran to completion regardless).
+     */
+    public boolean cancelAcknowledged() {
+        return cancelAcknowledged;
+    }
+
+    /**
+     * Called by the running job body once it decides to actually abort because of a
+     * cancellation request — as opposed to {@link #cancelRequested()}, which is set the
+     * moment cancellation is asked for and stays true even if the body finishes its real
+     * work anyway. Only bodies that call this end up {@code CANCELLED}; everything else
+     * that returns normally is {@code COMPLETED}, matching this class's contract that the
+     * body decides when/whether to honor a cancellation request.
+     */
+    public void acknowledgeCancel() {
+        this.cancelAcknowledged = true;
     }
 
     /** Called by the running job body to report progress (0-100, or -1 if indeterminate). */

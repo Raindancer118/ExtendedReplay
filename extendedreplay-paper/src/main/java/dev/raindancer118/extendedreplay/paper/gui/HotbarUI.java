@@ -82,6 +82,16 @@ public final class HotbarUI {
     }
 
     /**
+     * Drops a viewer's cached render state without touching their inventory — used when a
+     * viewer's real inventory is restored directly (non-lobby detach) instead of being
+     * replaced by {@link #give} or {@link #giveLobby}, so the stale entry doesn't linger
+     * forever (never keyed by {@link Player}, but still worth not leaking indefinitely).
+     */
+    public void forgetState(UUID playerId) {
+        renderedStates.remove(playerId);
+    }
+
+    /**
      * Updates only the dynamic play/pause (slot 2) and speed (slot 5) items in-place, and
      * only if the viewer's last-rendered state actually changed — cheap enough to call from
      * every hotbar-affecting action and from the periodic HUD tick.
