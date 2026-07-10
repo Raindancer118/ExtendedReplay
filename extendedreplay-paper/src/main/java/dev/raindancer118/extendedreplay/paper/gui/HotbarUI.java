@@ -30,7 +30,7 @@ public final class HotbarUI {
 
     /** Actions of the REPLAY server's lobby hotbar (no active playback/mirror). */
     public enum LobbyAction {
-        BROWSE_SESSIONS, LIVE_MIRROR, PLAY_LAST, HELP
+        BROWSE_SESSIONS, LIVE_MIRROR, PLAY_LAST, HELP, CONTROL_CENTER
     }
 
     /** Snapshot of the dynamic hotbar state (play/pause + speed) last rendered to a
@@ -127,6 +127,8 @@ public final class HotbarUI {
                 List.of(), lobbyKey, LobbyAction.LIVE_MIRROR.name()));
         inventory.setItem(4, taggedItem(Material.CLOCK, "⏱ Letzte Session abspielen",
                 List.of(), lobbyKey, LobbyAction.PLAY_LAST.name()));
+        inventory.setItem(6, taggedItem(Material.COMPASS, "🎬 Control Center",
+                List.of(), lobbyKey, LobbyAction.CONTROL_CENTER.name()));
         inventory.setItem(8, taggedItem(Material.BOOK, "❓ Hilfe",
                 List.of(), lobbyKey, LobbyAction.HELP.name()));
         // no playback active in the lobby — drop any stale render-state entry

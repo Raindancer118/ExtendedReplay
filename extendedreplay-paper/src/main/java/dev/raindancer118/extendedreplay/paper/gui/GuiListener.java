@@ -1,6 +1,9 @@
 package dev.raindancer118.extendedreplay.paper.gui;
 
 import dev.raindancer118.extendedreplay.api.ReplaySessionEndReason;
+import dev.raindancer118.extendedreplay.paper.job.Job;
+import dev.raindancer118.extendedreplay.paper.job.JobManager;
+import dev.raindancer118.extendedreplay.paper.job.VerifyJob;
 import dev.raindancer118.extendedreplay.paper.producer.ActiveSession;
 import dev.raindancer118.extendedreplay.paper.producer.ProducerManager;
 import dev.raindancer118.extendedreplay.paper.producer.RecordingStarter;
@@ -10,6 +13,7 @@ import dev.raindancer118.extendedreplay.storage.ReplayStorage;
 import dev.raindancer118.extendedreplay.storage.meta.EventRecord;
 import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -49,6 +53,7 @@ public final class GuiListener implements Listener {
     private final dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes;
     private final ProducerManager producer;
     private final RecordingStarter recordingStarter;
+    private final JobManager jobs;
 
     /**
      * @param playback         null on a pure PRODUCER server (no local playback)
@@ -57,11 +62,12 @@ public final class GuiListener implements Listener {
      * @param routes           null on a pure PRODUCER server
      * @param producer         null on a pure REPLAY server (no recording here)
      * @param recordingStarter null on a pure REPLAY server
+     * @param jobs             never null — instantiated for every non-DISABLED role
      */
     public GuiListener(dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin plugin,
                        PlaybackManager playback, ReplayStorage storage, HotbarUI hotbar,
                        dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes,
-                       ProducerManager producer, RecordingStarter recordingStarter) {
+                       ProducerManager producer, RecordingStarter recordingStarter, JobManager jobs) {
         this.plugin = plugin;
         this.playback = playback;
         this.storage = storage;
@@ -69,6 +75,7 @@ public final class GuiListener implements Listener {
         this.routes = routes;
         this.producer = producer;
         this.recordingStarter = recordingStarter;
+        this.jobs = jobs;
     }
 
     // --- chest GUIs ---
@@ -120,6 +127,21 @@ public final class GuiListener implements Listener {
         if (event.getInventory().getHolder() instanceof RecordControlGui gui) {
             event.setCancelled(true);
             onRecordControlClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof JobsGui gui) {
+            event.setCancelled(true);
+            onJobsClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof ControlCenterGui gui) {
+            event.setCancelled(true);
+            onControlCenterClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof SessionDetailsGui gui) {
+            event.setCancelled(true);
+            onSessionDetailsClick(event, gui);
             return;
         }
         if (!(event.getInventory().getHolder() instanceof EventBrowserGui gui)) {
@@ -355,6 +377,7 @@ public final class GuiListener implements Listener {
             case LIVE_MIRROR -> joinLiveMirror(player);
             case PLAY_LAST -> playLastSession(player);
             case HELP -> sendLobbyHelp(player);
+            case CONTROL_CENTER -> openControlCenter(player);
         }
     }
 
@@ -420,6 +443,11 @@ public final class GuiListener implements Listener {
      * thread. Used both for the initial open and the in-GUI refresh button.
      */
     public void openSessionBrowser(Player player) {
+        openSessionBrowser(player, SessionBrowserGui.Filter.ALL);
+    }
+
+    /** Same as {@link #openSessionBrowser(Player)}, opened with a specific starting filter. */
+    public void openSessionBrowser(Player player, SessionBrowserGui.Filter filter) {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             List<SessionRecord> sessions;
             try {
@@ -430,7 +458,7 @@ public final class GuiListener implements Listener {
                         Component.text("Sessions konnten nicht geladen werden.")));
                 return;
             }
-            Bukkit.getScheduler().runTask(plugin, () -> SessionBrowserGui.open(player, sessions, 0));
+            Bukkit.getScheduler().runTask(plugin, () -> SessionBrowserGui.open(player, sessions, 0, filter));
         });
     }
 
@@ -440,19 +468,23 @@ public final class GuiListener implements Listener {
         }
         int slot = event.getRawSlot();
         if (slot == 45 && gui.page() > 0) {
-            SessionBrowserGui.open(player, gui.sessions(), gui.page() - 1);
+            SessionBrowserGui.open(player, gui.sessions(), gui.page() - 1, gui.filter());
             return;
         }
-        if (slot == 53) {
-            SessionBrowserGui.open(player, gui.sessions(), gui.page() + 1);
+        if (slot == 46) {
+            SessionBrowserGui.open(player, gui.sessions(), 0, gui.filter().next());
             return;
         }
         if (slot == 47) {
-            openSessionBrowser(player);
+            openSessionBrowser(player, gui.filter());
             return;
         }
         if (slot == 49) {
             player.closeInventory();
+            return;
+        }
+        if (slot == 53) {
+            SessionBrowserGui.open(player, gui.sessions(), gui.page() + 1, gui.filter());
             return;
         }
         SessionRecord record = gui.sessionAt(slot);
@@ -463,24 +495,243 @@ public final class GuiListener implements Listener {
             player.sendMessage(Component.text("Keine Berechtigung zum Laden von Sessions."));
             return;
         }
-        if (!record.isFinished()) {
-            player.closeInventory();
-            var live = plugin.liveMirror();
-            if (live == null) {
-                player.sendMessage(Component.text("Live-Mirror ist auf diesem Server nicht verfügbar."));
-                return;
-            }
-            live.join(player, record.sessionId());
+        player.closeInventory();
+        SessionDetailsGui.open(player, plugin, storage, record.sessionId());
+    }
+
+    // --- session details GUI ---
+
+    private void onSessionDetailsClick(InventoryClickEvent event, SessionDetailsGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
             return;
         }
+        SessionDetailsGui.Action action = gui.actionOf(event.getCurrentItem());
+        if (action == null) {
+            return;
+        }
+        SessionRecord record = gui.record();
+        switch (action) {
+            case BACK -> openSessionBrowser(player);
+            case PLAY -> {
+                player.closeInventory();
+                player.sendMessage(Component.text("Lade Session " + record.name() + "…"));
+                playback.open(record.sessionId(), player).whenComplete((session, error) -> {
+                    if (error != null) {
+                        Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(Component.text(
+                                "Konnte Session nicht öffnen: "
+                                        + dev.raindancer118.extendedreplay.paper.util.Errors.describe(error))));
+                    }
+                });
+            }
+            case LIVE -> {
+                player.closeInventory();
+                var live = plugin.liveMirror();
+                if (live == null) {
+                    player.sendMessage(Component.text("Live-Mirror ist auf diesem Server nicht verfügbar."));
+                    return;
+                }
+                live.join(player, record.sessionId());
+            }
+            case VERIFY -> {
+                UUID playerId = player.getUniqueId();
+                Job job = VerifyJob.submit(jobs, storage, record.sessionId(), record.name(), line -> {
+                    Player online = Bukkit.getPlayer(playerId);
+                    if (online != null) {
+                        Bukkit.getScheduler().runTask(plugin, () -> online.sendMessage(Component.text(line)));
+                    }
+                });
+                player.sendMessage(Component.text("Job #" + job.id() + " gestartet: Verifizierung "
+                        + record.name()));
+            }
+            case FAVORITE -> {
+                UUID playerId = player.getUniqueId();
+                Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                    try {
+                        storage.database().setFavorite(record.sessionId(), !record.favorite());
+                    } catch (SQLException e) {
+                        plugin.getLogger().log(Level.WARNING, "Favorite toggle failed", e);
+                    }
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        Player online = Bukkit.getPlayer(playerId);
+                        if (online != null) {
+                            SessionDetailsGui.open(online, plugin, storage, record.sessionId());
+                        }
+                    });
+                });
+            }
+            case REINDEX -> {
+                if (!player.hasPermission("extendedreplay.storage")) {
+                    return;
+                }
+                player.closeInventory();
+                UUID playerId = player.getUniqueId();
+                Job job = jobs.submit("Reindex " + record.name(), "Session " + record.sessionId(), j -> {
+                    int packets = storage.reindex(record.sessionId());
+                    Player online = Bukkit.getPlayer(playerId);
+                    if (online != null) {
+                        Bukkit.getScheduler().runTask(plugin, () -> online.sendMessage(Component.text(
+                                "✔ Reindex fertig: " + packets + " Pakete indiziert.")));
+                    }
+                });
+                player.sendMessage(Component.text("Job #" + job.id() + " gestartet: Reindex " + record.name()));
+            }
+            case DELETE -> {
+                if (!player.hasPermission("extendedreplay.storage")) {
+                    return;
+                }
+                UUID playerId = player.getUniqueId();
+                UUID sessionId = record.sessionId();
+                String name = record.name();
+                ConfirmGui.open(player,
+                        Component.text("Session '" + name + "' wirklich löschen?"),
+                        List.of(
+                                Component.text("Größe: " + SessionBrowserGui.formatBytes(record.sizeBytes()),
+                                        NamedTextColor.GRAY),
+                                Component.text("Dauer: " + PlaybackSession.formatTicks(record.lastTick()),
+                                        NamedTextColor.GRAY),
+                                Component.text("Dies kann nicht rückgängig gemacht werden.",
+                                        NamedTextColor.RED)),
+                        () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                            String result;
+                            try {
+                                storage.deleteSessionData(sessionId);
+                                result = "Session '" + name + "' gelöscht.";
+                            } catch (Exception e) {
+                                plugin.getLogger().log(Level.WARNING, "Session delete failed", e);
+                                result = "Löschen fehlgeschlagen: "
+                                        + dev.raindancer118.extendedreplay.paper.util.Errors.describe(e);
+                            }
+                            String finalResult = result;
+                            Bukkit.getScheduler().runTask(plugin, () -> {
+                                Player online = Bukkit.getPlayer(playerId);
+                                if (online != null) {
+                                    online.sendMessage(Component.text(finalResult));
+                                    openSessionBrowser(online);
+                                }
+                            });
+                        }),
+                        () -> {
+                            Player online = Bukkit.getPlayer(playerId);
+                            if (online != null) {
+                                SessionDetailsGui.open(online, plugin, storage, sessionId);
+                            }
+                        });
+            }
+        }
+    }
+
+    // --- jobs GUI ---
+
+    public void openJobsGui(Player player) {
+        JobsGui.open(player, jobs, 0);
+    }
+
+    private void onJobsClick(InventoryClickEvent event, JobsGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        int slot = event.getRawSlot();
+        if (slot == 45 && gui.page() > 0) {
+            JobsGui.open(player, jobs, gui.page() - 1);
+            return;
+        }
+        if (slot == 47) {
+            JobsGui.open(player, jobs, gui.page());
+            return;
+        }
+        if (slot == 49) {
+            player.closeInventory();
+            return;
+        }
+        if (slot == 53) {
+            JobsGui.open(player, jobs, gui.page() + 1);
+            return;
+        }
+        Job job = gui.jobAt(slot);
+        if (job == null) {
+            return;
+        }
+        if (job.status() == Job.Status.RUNNING) {
+            jobs.cancel(job.id());
+            JobsGui.open(player, jobs, gui.page());
+        }
+    }
+
+    // --- control center GUI ---
+
+    /** Opens the main Replay Control Center, gated per-role like {@code /erp}'s buttons. */
+    public void openControlCenter(Player player) {
+        boolean canPlayback = playback != null;
+        boolean canRecord = plugin.role().records() && producer != null;
+        ControlCenterGui.open(player, plugin, canPlayback, canRecord);
+    }
+
+    private void onControlCenterClick(InventoryClickEvent event, ControlCenterGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        ControlCenterGui.Action action = gui.actionOf(event.getCurrentItem());
+        if (action == null) {
+            return;
+        }
+        switch (action) {
+            case SESSIONS -> openSessionBrowser(player, SessionBrowserGui.Filter.ALL);
+            case FAVORITES -> openSessionBrowser(player, SessionBrowserGui.Filter.FAVORITES);
+            case LIVE -> {
+                player.closeInventory();
+                joinLiveMirror(player);
+            }
+            case LAST -> {
+                player.closeInventory();
+                playLastSession(player);
+            }
+            case RECORD -> {
+                player.closeInventory();
+                openRecordControl(player);
+            }
+            case JOBS -> openJobsGui(player);
+            case STORAGE -> storageInfoChat(player);
+            case HELP -> {
+                player.closeInventory();
+                sendControlCenterHelp(player);
+            }
+        }
+    }
+
+    private void storageInfoChat(Player player) {
         player.closeInventory();
-        player.sendMessage(Component.text("Lade Session " + record.name() + "…"));
-        playback.open(record.sessionId(), player).whenComplete((session, error) -> {
-            if (error != null) {
-                Bukkit.getScheduler().runTask(plugin, () -> player.sendMessage(
-                        Component.text("Konnte Session nicht öffnen: " + dev.raindancer118.extendedreplay.paper.util.Errors.describe(error))));
+        if (storage == null) {
+            player.sendMessage(Component.text("Speicher-Info ist auf diesem Server nicht verfügbar."));
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                long bytes = storage.storageBytes();
+                int count = storage.listSessions(1000).size();
+                String message = "Speicher: " + (bytes / 1024 / 1024) + " MB · " + count + " Session(s)";
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    Player online = Bukkit.getPlayer(playerId);
+                    if (online != null) {
+                        online.sendMessage(Component.text(message));
+                    }
+                });
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.WARNING, "Storage info failed", e);
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    Player online = Bukkit.getPlayer(playerId);
+                    if (online != null) {
+                        online.sendMessage(Component.text("Speicher-Info konnte nicht geladen werden."));
+                    }
+                });
             }
         });
+    }
+
+    private void sendControlCenterHelp(Player player) {
+        player.sendMessage(Component.text("— ExtendedReplay Control Center —"));
+        player.sendMessage(Component.text("📼 Sessions · ★ Favoriten · 📡 Live · ⏱ Letzte Session"));
+        player.sendMessage(Component.text("⏺ Aufnahme · ⚙ Jobs · 💾 Speicher · /erp help für alle Befehle"));
     }
 
     // --- playback control GUI ---

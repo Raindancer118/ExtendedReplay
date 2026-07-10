@@ -46,6 +46,7 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
     private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotReceiver snapshotReceiver;
     private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotTransfer snapshotTransfer;
     private dev.raindancer118.extendedreplay.paper.producer.RecordingStarter recordingStarter;
+    private dev.raindancer118.extendedreplay.paper.job.JobManager jobs;
 
     @Override
     public void onEnable() {
@@ -61,6 +62,7 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
                 case DISABLED -> getLogger().info("ExtendedReplay is DISABLED by config.");
             }
             if (config.role() != ServerRole.DISABLED) {
+                jobs = new dev.raindancer118.extendedreplay.paper.job.JobManager(this);
                 finalizeGuiListener();
             }
         } catch (Exception e) {
@@ -186,7 +188,7 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
     private void finalizeGuiListener() {
         guiListener = new GuiListener(this, playback,
                 replayServer != null ? replayServer.storage() : null,
-                hotbar, routes, producer, recordingStarter);
+                hotbar, routes, producer, recordingStarter, jobs);
         Bukkit.getPluginManager().registerEvents(guiListener, this);
     }
 
@@ -309,6 +311,11 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
 
     public GuiListener guiListener() {
         return guiListener;
+    }
+
+    /** Never null once this plugin is active (any role but DISABLED). */
+    public dev.raindancer118.extendedreplay.paper.job.JobManager jobs() {
+        return jobs;
     }
 
     public ApiImpl api() {

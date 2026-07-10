@@ -45,11 +45,12 @@ public final class ErpCommand implements TabExecutor {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            return help(sender);
+            return menu(sender);
         }
         try {
             return switch (args[0].toLowerCase(Locale.ROOT)) {
                 case "help" -> help(sender);
+                case "menu" -> menu(sender);
                 case "status" -> status(sender);
                 case "test" -> test(sender);
                 case "record" -> record(sender, args);
@@ -106,7 +107,20 @@ public final class ErpCommand implements TabExecutor {
 
     // --- general ---
 
+    /** Opens the Replay Control Center for a player, or falls back to help() for the console. */
+    private boolean menu(CommandSender sender) {
+        if (!(sender instanceof Player player)) {
+            return help(sender);
+        }
+        if (!player.hasPermission("extendedreplay.viewer")) {
+            return noPermission(sender);
+        }
+        plugin.guiListener().openControlCenter(player);
+        return true;
+    }
+
     private boolean help(CommandSender sender) {
+        send(sender, "/erp · öffnet das Replay Control Center");
         send(sender, "— ExtendedReplay —");
         send(sender, "/erp status · Rolle, Metriken, Verbindung");
         if (plugin.role().records()) {
@@ -941,19 +955,24 @@ public final class ErpCommand implements TabExecutor {
         if (id == null) {
             return true;
         }
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                List<String> problems = plugin.replayServer().verify(id);
-                if (problems.isEmpty()) {
-                    send(sender, "✔ Session ist intakt (alle Checksummen OK).");
-                } else {
-                    send(sender, "✘ " + problems.size() + " Problem(e):");
-                    problems.forEach(problem -> send(sender, "  " + problem));
-                }
-            } catch (Exception e) {
-                send(sender, "Fehler: " + Errors.describe(e));
-            }
-        });
+        SessionRecord record;
+        try {
+            record = plugin.replayServer().storage().getSession(id).orElse(null);
+        } catch (Exception e) {
+            send(sender, "Fehler: " + Errors.describe(e));
+            return true;
+        }
+        if (record == null) {
+            send(sender, "Session nicht gefunden.");
+            return true;
+        }
+        if (plugin.jobs() == null) {
+            send(sender, "Jobs sind auf diesem Server nicht verfügbar.");
+            return true;
+        }
+        var job = dev.raindancer118.extendedreplay.paper.job.VerifyJob.submit(plugin.jobs(),
+                plugin.replayServer().storage(), id, record.name(), line -> send(sender, line));
+        send(sender, "Job #" + job.id() + " gestartet: Verifizierung " + record.name());
         return true;
     }
 
@@ -1171,7 +1190,7 @@ public final class ErpCommand implements TabExecutor {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias,
                                       String[] args) {
         if (args.length == 1) {
-            List<String> subs = new ArrayList<>(List.of("help", "status"));
+            List<String> subs = new ArrayList<>(List.of("help", "menu", "status"));
             if (plugin.role().records()) {
                 subs.addAll(List.of("record", "bookmark"));
             }
