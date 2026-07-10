@@ -118,6 +118,10 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
     }
 
     private void registerReplayParts() {
+        int stale = dev.raindancer118.extendedreplay.paper.replay.PlaybackWorlds.cleanupStaleWorldFolders();
+        if (stale > 0) {
+            getLogger().info(stale + " alte Playback-Welt(en) aufgeräumt.");
+        }
         hotbar = new HotbarUI(this);
         snapshots = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService(this,
                 getServer().getWorldContainer().toPath().resolve(config.snapshotPath()));

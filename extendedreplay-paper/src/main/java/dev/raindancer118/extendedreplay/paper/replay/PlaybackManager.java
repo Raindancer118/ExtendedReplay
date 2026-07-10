@@ -6,6 +6,7 @@ import dev.raindancer118.extendedreplay.paper.replay.render.ArmorStandRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.MannequinRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.ReplayActorRenderer;
 import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
+import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
@@ -114,9 +115,14 @@ public final class PlaybackManager {
         }
     }
 
+    /** Ticks a boss bar stays visible at 100% before being removed. */
+    private static final long PROGRESS_BAR_LINGER_TICKS = 40L; // 2s
+
     /**
      * Opens a playback session: packets load on an async thread, world creation, actor
-     * spawn and viewer teleport happen back on the main thread.
+     * spawn and viewer teleport happen back on the main thread. A boss bar shows the
+     * viewer visible loading progress throughout (session load 0-60%, world creation 65%,
+     * snapshot apply 75%, state rebuild 85%, then 100% "Ready" before it is removed).
      */
     public CompletableFuture<PlaybackSession> open(UUID sessionId, Player viewer) {
         PlaybackSession existing = sessionsById.get(sessionId);
@@ -125,6 +131,13 @@ public final class PlaybackManager {
             return CompletableFuture.completedFuture(existing);
         }
         CompletableFuture<PlaybackSession> future = new CompletableFuture<>();
+        UUID viewerId = viewer.getUniqueId();
+        // the console/command-block cannot see boss bars — but this method only ever
+        // receives a real logged-in Player (GUI clicks / player commands), never console
+        BossBar progressBar = BossBar.bossBar(Component.text("Lade Session… 0%"), 0f,
+                BossBar.Color.BLUE, BossBar.Overlay.PROGRESS);
+        viewer.showBossBar(progressBar);
+
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             List<ReplayPacket> packets;
             String name;
@@ -132,7 +145,8 @@ public final class PlaybackManager {
             String worldEnvironment;
             String snapshotName;
             try {
-                packets = replayServer.storage().loadSession(sessionId);
+                packets = replayServer.storage().loadSession(sessionId, percent ->
+                        updateProgressBar(progressBar, percent * 60 / 100, "Lade Session… " + percent + "%"));
                 SessionRecord sessionRecord = replayServer.storage().getSession(sessionId).orElse(null);
                 name = sessionRecord != null ? sessionRecord.name() : sessionId.toString();
                 worldSeed = sessionRecord != null ? sessionRecord.worldSeed() : null;
@@ -153,6 +167,7 @@ public final class PlaybackManager {
             String finalSnapshotName = snapshotName;
             Bukkit.getScheduler().runTask(plugin, () -> {
                 try {
+                    updateProgressBar(progressBar, 65, "Erstelle Welt…");
                     String worldName = config.playbackWorldPrefix() + "_" + (worldCounter++);
                     World world = finalWorldSeed != null
                             ? PlaybackWorlds.getOrCreate(worldName, finalWorldSeed, finalWorldEnvironment)
@@ -167,12 +182,16 @@ public final class PlaybackManager {
                     sessionsById.put(sessionId, session);
 
                     Runnable finish = () -> {
+                        updateProgressBar(progressBar, 85, "Baue Zustand auf…");
                         session.seek(0);
                         attachViewer(session, viewer);
+                        updateProgressBar(progressBar, 100, "✔ Bereit", BossBar.Color.GREEN);
+                        scheduleProgressBarRemoval(viewerId, progressBar);
                         future.complete(session);
                     };
                     // arena base state first, if the session references a local snapshot
                     if (finalSnapshotName != null && snapshots.exists(finalSnapshotName)) {
+                        updateProgressBar(progressBar, 75, "Wende Snapshot an…");
                         viewer.sendMessage(net.kyori.adventure.text.Component.text(
                                 "Wende Arena-Snapshot '" + finalSnapshotName + "' an…"));
                         snapshots.apply(finalSnapshotName, world, viewer)
@@ -192,9 +211,49 @@ public final class PlaybackManager {
             if (error != null) {
                 plugin.getLogger().log(java.util.logging.Level.WARNING,
                         "Opening playback session " + sessionId + " failed", error);
+                removeProgressBarNow(viewerId, progressBar);
             }
         });
         return future;
+    }
+
+    /**
+     * Updates a viewer's loading boss bar. Safe to call from any thread — the actual
+     * mutation always runs on the main thread via the scheduler, since Adventure boss bars
+     * push their state to viewers as soon as it changes.
+     */
+    private void updateProgressBar(BossBar bar, int percent, String text) {
+        updateProgressBar(bar, percent, text, null);
+    }
+
+    private void updateProgressBar(BossBar bar, int percent, String text, BossBar.Color color) {
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            bar.name(Component.text(text));
+            bar.progress(Math.max(0f, Math.min(1f, percent / 100f)));
+            if (color != null) {
+                bar.color(color);
+            }
+        });
+    }
+
+    /** Removes the boss bar after a short linger at 100%, so "Ready" is actually seen. */
+    private void scheduleProgressBarRemoval(UUID viewerId, BossBar bar) {
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            Player player = Bukkit.getPlayer(viewerId);
+            if (player != null) {
+                player.hideBossBar(bar);
+            }
+        }, PROGRESS_BAR_LINGER_TICKS);
+    }
+
+    /** Removes the boss bar immediately (error path) — safe from any thread. */
+    private void removeProgressBarNow(UUID viewerId, BossBar bar) {
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            Player player = Bukkit.getPlayer(viewerId);
+            if (player != null) {
+                player.hideBossBar(bar);
+            }
+        });
     }
 
     private ReplayActorRenderer createRenderer() {

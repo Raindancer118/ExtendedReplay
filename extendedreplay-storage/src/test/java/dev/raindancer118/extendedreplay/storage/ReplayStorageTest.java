@@ -19,6 +19,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -97,6 +98,23 @@ class ReplayStorageTest {
 
         // multiple segments: 1300 ticks > 600-tick segments
         assertThat(storage.database().listSegments(sessionId).size()).isGreaterThanOrEqualTo(2);
+    }
+
+    @Test
+    void loadSessionReportsAscendingProgressUpToHundred() throws Exception {
+        recordSampleSession();
+        // sanity check shared with fullSessionLifecycleRoundtrip: recordSampleSession must
+        // produce multiple segments, otherwise this test would trivially pass with one report
+        assertThat(storage.database().listSegments(sessionId).size()).isGreaterThanOrEqualTo(2);
+
+        List<Integer> reported = new ArrayList<>();
+        List<ReplayPacket> packets = storage.loadSession(sessionId, reported::add);
+
+        assertThat(packets).isNotEmpty();
+        assertThat(reported).isNotEmpty();
+        assertThat(reported).isSortedAccordingTo(java.util.Comparator.naturalOrder());
+        assertThat(reported.get(reported.size() - 1)).isEqualTo(100);
+        assertThat(reported).allMatch(value -> value >= 0 && value <= 100);
     }
 
     @Test

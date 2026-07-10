@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 import java.util.stream.Stream;
 
 /**
@@ -234,16 +235,41 @@ public final class ReplayStorage implements AutoCloseable {
      * index has no rows (e.g. after a crash before the DB row was written).
      */
     public void readSession(UUID sessionId, Consumer<ReplayPacket> consumer) throws IOException, SQLException {
-        for (Path file : segmentPaths(sessionId)) {
-            SegmentReader.SegmentContent content = SegmentReader.read(file);
+        readSession(sessionId, consumer, ignored -> { });
+    }
+
+    /**
+     * Same as {@link #readSession(UUID, Consumer)}, additionally reporting load progress
+     * as a 0-100 percentage after each segment file has been fully read (segments are read
+     * strictly sequentially, so the percentage only ever increases and reaches 100 once the
+     * last segment has been consumed). A session with zero segments reports 100 immediately.
+     */
+    public void readSession(UUID sessionId, Consumer<ReplayPacket> consumer, IntConsumer progressPercent)
+            throws IOException, SQLException {
+        List<Path> files = segmentPaths(sessionId);
+        int segmentCount = files.size();
+        if (segmentCount == 0) {
+            progressPercent.accept(100);
+            return;
+        }
+        for (int i = 0; i < segmentCount; i++) {
+            SegmentReader.SegmentContent content = SegmentReader.read(files.get(i));
             content.packets().forEach(consumer);
+            progressPercent.accept((i + 1) * 100 / segmentCount);
         }
     }
 
     /** All packets of a session, tick-sorted. Convenient for playback preparation. */
     public List<ReplayPacket> loadSession(UUID sessionId) throws IOException, SQLException {
+        return loadSession(sessionId, ignored -> { });
+    }
+
+    /** Same as {@link #loadSession(UUID)}, additionally reporting load progress; see
+     * {@link #readSession(UUID, Consumer, IntConsumer)}. */
+    public List<ReplayPacket> loadSession(UUID sessionId, IntConsumer progressPercent)
+            throws IOException, SQLException {
         List<ReplayPacket> packets = new ArrayList<>();
-        readSession(sessionId, packets::add);
+        readSession(sessionId, packets::add, progressPercent);
         packets.sort(Comparator.comparingInt(p -> Math.max(p.tick(), 0)));
         return packets;
     }

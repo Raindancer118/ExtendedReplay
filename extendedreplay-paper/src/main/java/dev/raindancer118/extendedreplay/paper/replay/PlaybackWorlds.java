@@ -27,15 +27,76 @@ public final class PlaybackWorlds {
     /** Tracks the seed this process created each playback world with (null = void world). */
     private static final Map<String, Long> trackedSeeds = new ConcurrentHashMap<>();
 
+    /** Stored in {@link #trackedSeeds} for void worlds — the map cannot hold null values. */
+    private static final Long VOID_SEED_SENTINEL = Long.MIN_VALUE;
+
     private PlaybackWorlds() {
     }
 
-    /** An entirely empty chunk generator: playback worlds contain only replayed state. */
+    /** An entirely empty chunk generator: playback worlds contain only replayed state.
+     * Also fixes the spawn location so the vanilla spawn-point scan (a synchronous,
+     * main-thread search for a "safe" surface block) never runs for this tiny world. */
     private static final class VoidGenerator extends ChunkGenerator {
         @Override
         public void generateNoise(org.bukkit.generator.WorldInfo worldInfo, Random random,
                                   int chunkX, int chunkZ, ChunkData chunkData) {
             // intentionally empty: void world
+        }
+
+        @Override
+        public Location getFixedSpawnLocation(World world, Random random) {
+            return new Location(world, 0.5, 64, 0.5);
+        }
+    }
+
+    /**
+     * Wraps vanilla chunk generation (noise/surface/caves/decorations/mobs/structures all
+     * delegated to the server, exactly as if no custom generator were set) but skips the
+     * vanilla spawn-point scan by supplying a fixed spawn. That scan runs synchronously on
+     * the main thread while the world is created and was observed to freeze the server for
+     * over 10 seconds on seeded natural worlds (watchdog: "Selecting spawn point for world
+     * ..."); {@code keepSpawnLoaded(FALSE)} alone does not skip it, only a fixed spawn does.
+     */
+    private static final class VanillaWithFixedSpawn extends ChunkGenerator {
+        @Override
+        public boolean shouldGenerateNoise(org.bukkit.generator.WorldInfo worldInfo, Random random,
+                                            int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public boolean shouldGenerateSurface(org.bukkit.generator.WorldInfo worldInfo, Random random,
+                                              int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public boolean shouldGenerateCaves(org.bukkit.generator.WorldInfo worldInfo, Random random,
+                                            int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public boolean shouldGenerateDecorations(org.bukkit.generator.WorldInfo worldInfo, Random random,
+                                                  int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public boolean shouldGenerateMobs(org.bukkit.generator.WorldInfo worldInfo, Random random,
+                                           int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public boolean shouldGenerateStructures(org.bukkit.generator.WorldInfo worldInfo, Random random,
+                                                 int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public Location getFixedSpawnLocation(World world, Random random) {
+            return new Location(world, 0.5, 128, 0.5);
         }
     }
 
@@ -54,9 +115,15 @@ public final class PlaybackWorlds {
         if (existing != null) {
             return existing;
         }
+        // a leftover folder from an earlier run would make Bukkit load the OLD world and
+        // silently ignore the requested seed — the viewer would land in the wrong terrain
+        if (name.startsWith(PLAYBACK_PREFIX)) {
+            deleteWorldFolder(name);
+        }
         World world = createWorld(name, seed, environment);
         configureWorld(world);
-        trackedSeeds.put(name, seed);
+        // ConcurrentHashMap forbids null values — void worlds (no seed) use a sentinel
+        trackedSeeds.put(name, seed != null ? seed : VOID_SEED_SENTINEL);
         return world;
     }
 
@@ -69,6 +136,7 @@ public final class PlaybackWorlds {
                     .seed(seed)
                     .environment(parseEnvironment(environment))
                     .generateStructures(true)
+                    .generator(new VanillaWithFixedSpawn())
                     .keepSpawnLoaded(net.kyori.adventure.util.TriState.FALSE);
             return creator.createWorld();
         }
@@ -122,7 +190,8 @@ public final class PlaybackWorlds {
     public static World recreateIfSeedDiffers(String name, Long seed, String environment) {
         Long tracked = trackedSeeds.get(name);
         World loaded = Bukkit.getWorld(name);
-        if (Objects.equals(tracked, seed) && loaded != null) {
+        Long wanted = seed != null ? seed : VOID_SEED_SENTINEL;
+        if (Objects.equals(tracked, wanted) && loaded != null) {
             return loaded;
         }
         if (!name.startsWith(PLAYBACK_PREFIX)) {
@@ -140,6 +209,30 @@ public final class PlaybackWorlds {
         trackedSeeds.remove(name);
         deleteWorldFolder(name);
         return getOrCreate(name, seed, environment);
+    }
+
+    /**
+     * Deletes all not-currently-loaded {@value #PLAYBACK_PREFIX}* world folders. Playback
+     * worlds are throwaway state (auto-save is off, content is rebuilt from the recording
+     * on every open), but their folders survive restarts — and a stale folder hijacks any
+     * later world of the same name, seed included. Call once on plugin enable.
+     */
+    public static int cleanupStaleWorldFolders() {
+        Path root = Bukkit.getWorldContainer().toPath().normalize();
+        int deleted = 0;
+        try (Stream<Path> children = Files.list(root)) {
+            for (Path child : children.toList()) {
+                String name = child.getFileName().toString();
+                if (name.startsWith(PLAYBACK_PREFIX) && Files.isDirectory(child)
+                        && Bukkit.getWorld(name) == null) {
+                    deleteWorldFolder(name);
+                    deleted++;
+                }
+            }
+        } catch (IOException ignored) {
+            // best effort — a failed cleanup only means slightly more disk usage
+        }
+        return deleted;
     }
 
     /** Deletes a playback world's folder from disk. Only ever a direct child of the server
