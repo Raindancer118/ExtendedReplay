@@ -206,9 +206,9 @@ replay server over the existing WebSocket connection — no manual copying.
 
 | Group | Commands |
 |-------|----------|
-| **General** | `/erp` · `gui` · `help` · `status` · `test` |
+| **General** | `/erp` (opens the Replay Control Center) · `menu` · `gui` · `help` · `status` · `test` |
 | **Recording** | `record start [name] [snapshot\|-] [world]` (console needs the world arg or uses the default world) · `record stop` · `sessions` · `session <id>` |
-| **Playback** | `play <id>` · `connect <id>` (fresh seed-matched world) · `disconnect`/`close` · `pause` · `resume` · `speed <0.25–8>` · `jump <time>` · `rewind <s>` · `forward <s>` |
+| **Playback** | `play <id>` · `connect <id>` (fresh seed-matched world) · `disconnect`/`close` · `pause` · `resume` · `speed <0.05–64>` · `jump <time>` · `rewind <s>` · `forward <s>` |
 | **Live** | `live` |
 | **Events** | `events` · `event <id>` · `jump event <id>` · `bookmark <name>` · `bookmarks` |
 | **Scenes** | `scene create <name>` · `scene list` · `scene open <name>` · `scene delete <name>` |
@@ -220,16 +220,29 @@ replay server over the existing WebSocket connection — no manual copying.
 
 </details>
 
-Moderators in a replay session also get a **hotbar control UI** — play/pause, timeline,
-event browser, player follow, camera, routes, inspection, speed and exit on slots 1–9.
+ExtendedReplay is **GUI-first** — `/erp` opens the **Replay Control Center** (sessions,
+favorites, live join, last session, recording control, jobs, storage, help) and every
+core action works without typing another command.
 
-On a dedicated `REPLAY` server, viewers are greeted with a **lobby hotbar** on join
-(session browser, live mirror, replay the latest session, help), `/erp gui` opens a
-paginated **session browser** — one click loads a recording into a fresh world generated
-with the original arena's seed — and during playback it opens a full **control panel**
-(play/pause, skip ±10s/±1min, speed presets, jump-to-event, follow with real player
-skins). Natural mob spawning is disabled on replay servers; replayed entities are
-unaffected.
+Moderators in a replay session get the **replay hotbar**: previous/next event,
+rewind/fast-forward (10 s, shift 60 s), a dynamic play/pause item, an always-visible
+speed item (0.1x–64x plus single-tick stepping while paused), the player panel
+(left-click follow, right-click exact POV, shift-left teleport, shift-right live
+inventory inspection), a container browser, freecam and a menu item (shift-click leaves
+the replay). A persistent **boss-bar HUD** shows session, time, speed, state and the
+followed player; inventory and container views **update live** while the replay plays or
+seeks.
+
+The paginated **session browser** (filterable by favorites/live) shows the recording
+server, world, duration, player count, size and a color-coded integrity state
+(`EXACT` / `VERIFIED` / `DEGRADED` / `INCOMPLETE` / `UNKNOWN`); clicking a session opens
+a **details panel** with play, live join, verify/reindex as cancellable **background
+jobs**, favorite toggle and delete behind a confirmation dialog.
+
+Playback worlds are strictly **read-only**: viewers take no damage, never hunger, can't
+pick up items, break/place blocks, open containers directly or be targeted by mobs, and
+deterministic gamerules stop all natural ticking — everything visible originates from the
+arena baseline and the recorded packets.
 
 ---
 
