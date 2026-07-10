@@ -177,6 +177,40 @@ class PacketCodecTest {
     }
 
     @Test
+    void snapshotFileBeginRoundtrip() throws IOException {
+        var packet = new ReplayPacket.SnapshotFileBegin("arena-v1",
+                "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9", 1_048_576L, 4);
+        assertThat(roundtrip(packet)).isEqualTo(packet);
+        assertThat(packet.critical()).isTrue();
+        assertThat(packet.tick()).isEqualTo(-1);
+    }
+
+    @Test
+    void snapshotFileChunkRoundtripComparesArrayContent() throws IOException {
+        byte[] data = new byte[]{1, 2, 3, 4, 5, 6, 7, 8};
+        var packet = new ReplayPacket.SnapshotFileChunk("arena-v1", 2, data);
+        var decoded = (ReplayPacket.SnapshotFileChunk) roundtrip(packet);
+        assertThat(decoded.name()).isEqualTo("arena-v1");
+        assertThat(decoded.chunkIndex()).isEqualTo(2);
+        assertThat(decoded.data()).containsExactly(1, 2, 3, 4, 5, 6, 7, 8);
+        assertThat(decoded.critical()).isTrue();
+    }
+
+    @Test
+    void snapshotFileChunkRoundtripEmptyArray() throws IOException {
+        var packet = new ReplayPacket.SnapshotFileChunk("arena-v1", 0, new byte[0]);
+        var decoded = (ReplayPacket.SnapshotFileChunk) roundtrip(packet);
+        assertThat(decoded.data()).isEmpty();
+    }
+
+    @Test
+    void snapshotFileEndRoundtrip() throws IOException {
+        var packet = new ReplayPacket.SnapshotFileEnd("arena-v1");
+        assertThat(roundtrip(packet)).isEqualTo(packet);
+        assertThat(packet.type()).isEqualTo(PacketType.SNAPSHOT_FILE_END);
+    }
+
+    @Test
     void unknownPacketTypeDecodesToNull() throws IOException {
         byte[] data = new byte[]{(byte) 200, 1}; // varint 200 = unknown type id
         assertThat(PacketCodec.decode(data)).isNull();

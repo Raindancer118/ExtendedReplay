@@ -112,7 +112,8 @@ public final class ErpCommand implements TabExecutor {
         send(sender, "— ExtendedReplay —");
         send(sender, "/erp status · Rolle, Metriken, Verbindung");
         if (plugin.role().records()) {
-            send(sender, "/erp record start <name> | stop · Aufnahme");
+            send(sender, "/erp record start <name> [snapshot|-] [welt] | stop · Aufnahme");
+            send(sender, "/erp gui · Aufnahme-Steuerung (Radius, Start/Stop)");
         }
         if (plugin.role().playsBack()) {
             send(sender, "/erp sessions · /erp play <id> · /erp connect <id> · /erp close");
@@ -181,9 +182,9 @@ public final class ErpCommand implements TabExecutor {
             return true;
         }
         if (args.length >= 2 && args[1].equalsIgnoreCase("start")) {
-            // /erp record start [name] [snapshot] [world]
-            // In-game: world defaults to the player's world. Console: world argument
-            // or the server's default world.
+            // /erp record start [name] [snapshot|-] [world]
+            // In-game: world/anchor default to the player. Console: world argument
+            // or the server's default world, anchor = that world's spawn.
             org.bukkit.World world;
             if (args.length >= 5) {
                 world = Bukkit.getWorld(args[4]);
@@ -196,23 +197,12 @@ public final class ErpCommand implements TabExecutor {
             } else {
                 world = Bukkit.getWorlds().get(0);
             }
+            org.bukkit.Location anchor = sender instanceof Player player
+                    ? player.getLocation() : world.getSpawnLocation();
             String name = args.length >= 3 ? args[2]
                     : "session-" + System.currentTimeMillis() / 1000;
-            Map<String, String> metadata = new java.util.HashMap<>();
-            metadata.put("started-by", sender.getName());
-            if (args.length >= 4 && !args[3].equals("-")) {
-                if (!plugin.snapshots().exists(args[3])) {
-                    send(sender, "Snapshot '" + args[3] + "' existiert nicht — "
-                            + "erst /erp snapshot create " + args[3]);
-                    return true;
-                }
-                metadata.put("snapshot", args[3]);
-            }
-            ActiveSession session = plugin.producer().startSession(name, null,
-                    world, null, metadata);
-            send(sender, "Aufnahme gestartet: " + name + " (" + session.sessionId() + ")"
-                    + " · Welt: " + world.getName()
-                    + (metadata.containsKey("snapshot") ? " · Snapshot: " + args[3] : ""));
+            String manualSnapshotName = args.length >= 4 ? args[3] : null;
+            plugin.recordingStarter().start(sender, name, world, anchor, null, manualSnapshotName);
             return true;
         }
         if (args.length >= 2 && args[1].equalsIgnoreCase("stop")) {
@@ -1042,18 +1032,35 @@ public final class ErpCommand implements TabExecutor {
         return true;
     }
 
+    /**
+     * Opens the GUI matching the player's current situation. Priority: an active playback
+     * session always wins (even on STANDALONE, where both roles are active); otherwise, on
+     * a server that records ({@link dev.raindancer118.extendedreplay.paper.config.ServerRole#records()}
+     * — PRODUCER or STANDALONE), the recording control panel; otherwise the session
+     * browser. A pure REPLAY server behaves exactly as before (records() is false there).
+     */
     private boolean gui(CommandSender sender) {
-        if (sender instanceof Player player && plugin.playback() != null) {
-            PlaybackSession session = plugin.playback().sessionOf(player).orElse(null);
-            if (session != null) {
-                plugin.hotbar().give(player);
-                plugin.guiListener().openPlaybackControl(player, session);
-                send(sender, "Wiedergabe-GUI geöffnet.");
+        if (sender instanceof Player player) {
+            if (plugin.playback() != null) {
+                PlaybackSession session = plugin.playback().sessionOf(player).orElse(null);
+                if (session != null) {
+                    plugin.hotbar().give(player);
+                    plugin.guiListener().openPlaybackControl(player, session);
+                    send(sender, "Wiedergabe-GUI geöffnet.");
+                    return true;
+                }
+            }
+            boolean isLiveViewer = plugin.liveMirror() != null && plugin.liveMirror().isViewer(player);
+            if (!isLiveViewer && plugin.role().records() && plugin.producer() != null) {
+                if (!sender.hasPermission("extendedreplay.record")) {
+                    return noPermission(sender);
+                }
+                plugin.guiListener().openRecordControl(player);
+                send(sender, "Aufnahme-GUI geöffnet.");
                 return true;
             }
             // no active playback and not currently watching the live mirror: offer the
             // full session browser instead of the hotbar so the player can pick a recording
-            boolean isLiveViewer = plugin.liveMirror() != null && plugin.liveMirror().isViewer(player);
             if (!isLiveViewer) {
                 if (!sender.hasPermission("extendedreplay.viewer")) {
                     return noPermission(sender);

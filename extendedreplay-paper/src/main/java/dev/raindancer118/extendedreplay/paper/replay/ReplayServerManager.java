@@ -3,6 +3,7 @@ package dev.raindancer118.extendedreplay.paper.replay;
 import dev.raindancer118.extendedreplay.core.pipeline.CaptureMetrics;
 import dev.raindancer118.extendedreplay.core.protocol.ReplayPacket;
 import dev.raindancer118.extendedreplay.paper.config.ReplayConfig;
+import dev.raindancer118.extendedreplay.paper.snapshot.SnapshotReceiver;
 import dev.raindancer118.extendedreplay.storage.ReplayStorage;
 import dev.raindancer118.extendedreplay.transport.websocket.WebSocketReplayServer;
 import org.bukkit.plugin.Plugin;
@@ -37,6 +38,7 @@ public final class ReplayServerManager {
     private final ScheduledExecutorService storageThread;
     private final Map<UUID, String> liveSessions = new ConcurrentHashMap<>();
     private final Map<UUID, Consumer<ReplayPacket>> liveListeners = new ConcurrentHashMap<>();
+    private volatile SnapshotReceiver snapshotReceiver; // set once by registerReplayParts()
 
     public ReplayServerManager(Plugin plugin, ReplayConfig config, CaptureMetrics metrics,
                                boolean startWebSocket) throws SQLException, IOException {
@@ -90,6 +92,23 @@ public final class ReplayServerManager {
     private void drainToStorage() {
         ReplayPacket packet;
         while ((packet = ingestQueue.poll()) != null) {
+            if (isSnapshotFilePacket(packet)) {
+                // Snapshot file transfers are session-less and never persisted through the
+                // normal segment/metadata pipeline — they go straight to the receiver, which
+                // writes the incoming .erpa to disk itself. Live listeners don't need these.
+                SnapshotReceiver receiver = snapshotReceiver;
+                if (receiver != null) {
+                    try {
+                        receiver.accept(packet);
+                    } catch (Exception e) {
+                        plugin.getLogger().log(Level.WARNING, "Snapshot receiver failed", e);
+                    }
+                } else {
+                    plugin.getLogger().warning("Received " + packet.type()
+                            + " before the snapshot receiver was ready — packet dropped.");
+                }
+                continue;
+            }
             try {
                 storage.ingest(packet);
             } catch (IOException | SQLException e) {
@@ -106,6 +125,12 @@ public final class ReplayServerManager {
         }
     }
 
+    private static boolean isSnapshotFilePacket(ReplayPacket packet) {
+        return packet instanceof ReplayPacket.SnapshotFileBegin
+                || packet instanceof ReplayPacket.SnapshotFileChunk
+                || packet instanceof ReplayPacket.SnapshotFileEnd;
+    }
+
     private void trackLiveness(ReplayPacket packet) {
         if (packet instanceof ReplayPacket.SessionStart start) {
             liveSessions.put(start.sessionId(), start.name());
@@ -119,6 +144,20 @@ public final class ReplayServerManager {
 
     public ReplayStorage storage() {
         return storage;
+    }
+
+    /**
+     * Registers the receiver that {@code SNAPSHOT_FILE_*} packets are routed to instead of
+     * {@link ReplayStorage#ingest}. Set once from {@code ExtendedReplayPlugin.registerReplayParts()}
+     * after the {@link dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService}
+     * (and thus its target directory) is known.
+     */
+    public void setSnapshotReceiver(SnapshotReceiver snapshotReceiver) {
+        this.snapshotReceiver = snapshotReceiver;
+    }
+
+    public SnapshotReceiver snapshotReceiver() {
+        return snapshotReceiver;
     }
 
     public Map<UUID, String> liveSessions() {

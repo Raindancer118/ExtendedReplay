@@ -237,6 +237,18 @@ public final class PacketCodec {
                 PacketIO.writeVarInt(out, p.endTick());
                 PacketIO.writeVarInt(out, p.level());
             }
+            case ReplayPacket.SnapshotFileBegin p -> {
+                PacketIO.writeString(out, p.name());
+                PacketIO.writeString(out, p.sha256());
+                out.writeLong(p.totalBytes());
+                PacketIO.writeVarInt(out, p.chunkCount());
+            }
+            case ReplayPacket.SnapshotFileChunk p -> {
+                PacketIO.writeString(out, p.name());
+                PacketIO.writeVarInt(out, p.chunkIndex());
+                PacketIO.writeByteArray(out, p.data());
+            }
+            case ReplayPacket.SnapshotFileEnd p -> PacketIO.writeString(out, p.name());
         }
     }
 
@@ -359,6 +371,12 @@ public final class PacketCodec {
             case DEGRADATION_MARKER -> new ReplayPacket.DegradationMarker(
                     PacketIO.readUuid(in), PacketIO.readVarInt(in), PacketIO.readVarInt(in),
                     PacketIO.readVarInt(in));
+            case SNAPSHOT_FILE_BEGIN -> new ReplayPacket.SnapshotFileBegin(
+                    PacketIO.readString(in), PacketIO.readString(in), in.readLong(),
+                    PacketIO.readVarInt(in));
+            case SNAPSHOT_FILE_CHUNK -> new ReplayPacket.SnapshotFileChunk(
+                    PacketIO.readString(in), PacketIO.readVarInt(in), PacketIO.readByteArray(in));
+            case SNAPSHOT_FILE_END -> new ReplayPacket.SnapshotFileEnd(PacketIO.readString(in));
         };
     }
 

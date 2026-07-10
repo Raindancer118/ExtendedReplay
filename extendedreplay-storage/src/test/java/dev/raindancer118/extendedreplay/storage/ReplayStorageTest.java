@@ -306,6 +306,19 @@ class ReplayStorageTest {
     }
 
     @Test
+    void ingestSkipsSessionLessSnapshotFilePacketsInsteadOfThrowing() throws Exception {
+        // Snapshot file transfers are session-less by design and must be intercepted by
+        // ReplayServerManager before reaching storage — but if one ever slips through,
+        // ingest() must skip it defensively rather than crash the storage thread.
+        storage.ingest(new ReplayPacket.SnapshotFileBegin("arena-v1", "deadbeef", 10L, 1));
+        storage.ingest(new ReplayPacket.SnapshotFileChunk("arena-v1", 0, new byte[]{1, 2, 3}));
+        storage.ingest(new ReplayPacket.SnapshotFileEnd("arena-v1"));
+
+        // no session was ever started, so nothing should have been created on disk/index
+        assertThat(storage.listSessions(10)).isEmpty();
+    }
+
+    @Test
     void migratesPreExistingDatabaseWithoutWorldSeedColumns() throws Exception {
         Path dbFile = tempDir.resolve("legacy/metadata.db");
         Files.createDirectories(dbFile.getParent());

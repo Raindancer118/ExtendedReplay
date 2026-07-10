@@ -41,7 +41,13 @@ public final class SnapshotService {
         return jobRunning;
     }
 
-    private Path fileOf(String name) {
+    /**
+     * File path for a snapshot name under this service's directory, following the fixed
+     * sanitization + {@code .erpa} suffix convention. Public so {@link SnapshotReceiver}
+     * can place a completed producer transfer at exactly the same location this service
+     * later reads from (create/apply/list/exists all use this same convention).
+     */
+    public Path fileOf(String name) {
         String safe = name.replaceAll("[^a-zA-Z0-9._-]", "_");
         return directory.resolve(safe + ".erpa");
     }

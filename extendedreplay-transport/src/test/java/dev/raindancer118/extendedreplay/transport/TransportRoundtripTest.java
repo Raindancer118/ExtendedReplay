@@ -11,13 +11,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -203,5 +208,78 @@ class TransportRoundtripTest {
         }
         assertThat(received.stream().filter(p -> p instanceof ReplayPacket.PlayerFramePacket))
                 .hasSize(2);
+    }
+
+    /**
+     * End-to-end snapshot file transfer over a real WebSocket connection: BEGIN, CHUNK
+     * (repeated) and END packets carry an arbitrary byte blob through the same
+     * client/server pair used for the regular packet stream. Verifies the wire format
+     * survives a real connection (including zstd batch compression) and that the
+     * reassembled file matches byte-for-byte, sha256 included — the same check
+     * {@code SnapshotReceiver} performs on the replay-paper side.
+     */
+    @Test
+    @Timeout(30)
+    void snapshotFileTransferArrivesIntactOverWebSocket(@TempDir Path dir) throws Exception {
+        int port = freePort();
+        String snapshotName = "arena-v1";
+
+        // ~700 KiB of random data so it spans multiple 256 KiB chunks.
+        byte[] original = new byte[700 * 1024 + 123];
+        new SecureRandom().nextBytes(original);
+        String expectedSha256 = sha256(original);
+        int chunkSize = 256 * 1024;
+        int chunkCount = (original.length + chunkSize - 1) / chunkSize;
+
+        Map<String, ByteArrayOutputStream> reassembled = new ConcurrentHashMap<>();
+        CountDownLatch transferDone = new CountDownLatch(1);
+
+        WebSocketReplayServer server = new WebSocketReplayServer(LOGGER, "127.0.0.1", port,
+                "test-token", packet -> {
+            switch (packet) {
+                case ReplayPacket.SnapshotFileBegin p ->
+                        reassembled.put(p.name(), new ByteArrayOutputStream());
+                case ReplayPacket.SnapshotFileChunk p -> {
+                    ByteArrayOutputStream out = reassembled.get(p.name());
+                    if (out != null) {
+                        out.writeBytes(p.data());
+                    }
+                }
+                case ReplayPacket.SnapshotFileEnd ignored -> transferDone.countDown();
+                default -> { }
+            }
+        });
+        server.start();
+        try {
+            WebSocketReplayClient client = new WebSocketReplayClient(LOGGER, "127.0.0.1", port,
+                    "test-token", "producer-test", 25, dir.resolve("spool.erpq"),
+                    16 * 1024 * 1024, new CaptureMetrics());
+            client.start();
+
+            client.send(new ReplayPacket.SnapshotFileBegin(snapshotName, expectedSha256,
+                    original.length, chunkCount));
+            for (int i = 0; i < chunkCount; i++) {
+                int from = i * chunkSize;
+                int to = Math.min(original.length, from + chunkSize);
+                byte[] chunk = java.util.Arrays.copyOfRange(original, from, to);
+                client.send(new ReplayPacket.SnapshotFileChunk(snapshotName, i, chunk));
+            }
+            client.send(new ReplayPacket.SnapshotFileEnd(snapshotName));
+
+            assertThat(transferDone.await(15, TimeUnit.SECONDS))
+                    .as("snapshot transfer should complete via websocket").isTrue();
+            client.close();
+        } finally {
+            server.stop(1000);
+        }
+
+        byte[] received = reassembled.get(snapshotName).toByteArray();
+        assertThat(received).isEqualTo(original);
+        assertThat(sha256(received)).isEqualTo(expectedSha256);
+    }
+
+    private static String sha256(byte[] data) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        return HexFormat.of().formatHex(digest.digest(data));
     }
 }

@@ -1,5 +1,9 @@
 package dev.raindancer118.extendedreplay.paper.gui;
 
+import dev.raindancer118.extendedreplay.api.ReplaySessionEndReason;
+import dev.raindancer118.extendedreplay.paper.producer.ActiveSession;
+import dev.raindancer118.extendedreplay.paper.producer.ProducerManager;
+import dev.raindancer118.extendedreplay.paper.producer.RecordingStarter;
 import dev.raindancer118.extendedreplay.paper.replay.PlaybackManager;
 import dev.raindancer118.extendedreplay.paper.replay.PlaybackSession;
 import dev.raindancer118.extendedreplay.storage.ReplayStorage;
@@ -28,8 +32,12 @@ import java.util.UUID;
 import java.util.logging.Level;
 
 /**
- * Dispatches clicks in replay GUIs and hotbar item usage. Only active on servers that
- * play back (REPLAY/STANDALONE).
+ * Dispatches clicks in replay/record GUIs and hotbar item usage. Constructed once per
+ * server; which dependencies are non-null depends on the configured
+ * {@link dev.raindancer118.extendedreplay.paper.config.ServerRole} — a pure REPLAY server
+ * has no {@code producer}/{@code recordingStarter}, a pure PRODUCER server has no
+ * {@code playback}/{@code storage}/{@code hotbar}/{@code routes}; STANDALONE has all of
+ * them. Every handler that touches a role-specific dependency guards it with a null check.
  */
 public final class GuiListener implements Listener {
 
@@ -38,16 +46,29 @@ public final class GuiListener implements Listener {
     private final ReplayStorage storage;
     private final HotbarUI hotbar;
     private final dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes;
+    private final ProducerManager producer;
+    private final RecordingStarter recordingStarter;
     private static final double[] SPEED_STEPS = PlaybackControlGui.SPEED_STEPS;
 
+    /**
+     * @param playback         null on a pure PRODUCER server (no local playback)
+     * @param storage          null on a pure PRODUCER server
+     * @param hotbar           null on a pure PRODUCER server (only playback/lobby use it)
+     * @param routes           null on a pure PRODUCER server
+     * @param producer         null on a pure REPLAY server (no recording here)
+     * @param recordingStarter null on a pure REPLAY server
+     */
     public GuiListener(dev.raindancer118.extendedreplay.paper.ExtendedReplayPlugin plugin,
                        PlaybackManager playback, ReplayStorage storage, HotbarUI hotbar,
-                       dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes) {
+                       dev.raindancer118.extendedreplay.paper.replay.route.RouteManager routes,
+                       ProducerManager producer, RecordingStarter recordingStarter) {
         this.plugin = plugin;
         this.playback = playback;
         this.storage = storage;
         this.hotbar = hotbar;
         this.routes = routes;
+        this.producer = producer;
+        this.recordingStarter = recordingStarter;
     }
 
     // --- chest GUIs ---
@@ -55,8 +76,9 @@ public final class GuiListener implements Listener {
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
         // hotbar items (playback and lobby) may never be moved, shift-clicked away or
-        // swapped into another slot/inventory — checked before any GUI-specific dispatch
-        if (event.getWhoClicked() instanceof Player
+        // swapped into another slot/inventory — checked before any GUI-specific dispatch.
+        // hotbar is null on a pure PRODUCER server, which never gives one out.
+        if (hotbar != null && event.getWhoClicked() instanceof Player
                 && (hotbar.isTagged(event.getCurrentItem()) || hotbar.isTagged(event.getCursor()))) {
             event.setCancelled(true);
             return;
@@ -78,6 +100,11 @@ public final class GuiListener implements Listener {
         if (event.getInventory().getHolder() instanceof SessionBrowserGui gui) {
             event.setCancelled(true);
             onSessionBrowserClick(event, gui);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof RecordControlGui gui) {
+            event.setCancelled(true);
+            onRecordControlClick(event, gui);
             return;
         }
         if (!(event.getInventory().getHolder() instanceof EventBrowserGui gui)) {
@@ -130,7 +157,7 @@ public final class GuiListener implements Listener {
     /** Blocks dragging a hotbar item across slots (e.g. splitting a stack out of it). */
     @EventHandler
     public void onInventoryDrag(InventoryDragEvent event) {
-        if (hotbar.isTagged(event.getOldCursor())) {
+        if (hotbar != null && hotbar.isTagged(event.getOldCursor())) {
             event.setCancelled(true);
         }
     }
@@ -138,7 +165,7 @@ public final class GuiListener implements Listener {
     /** Blocks dropping a hotbar item (Q key) out of the inventory entirely. */
     @EventHandler
     public void onDrop(PlayerDropItemEvent event) {
-        if (hotbar.isTagged(event.getItemDrop().getItemStack())) {
+        if (hotbar != null && hotbar.isTagged(event.getItemDrop().getItemStack())) {
             event.setCancelled(true);
         }
     }
@@ -146,7 +173,8 @@ public final class GuiListener implements Listener {
     /** Blocks swapping a hotbar item into the off-hand (F key). */
     @EventHandler
     public void onSwapHands(PlayerSwapHandItemsEvent event) {
-        if (hotbar.isTagged(event.getMainHandItem()) || hotbar.isTagged(event.getOffHandItem())) {
+        if (hotbar != null
+                && (hotbar.isTagged(event.getMainHandItem()) || hotbar.isTagged(event.getOffHandItem()))) {
             event.setCancelled(true);
         }
     }
@@ -155,6 +183,10 @@ public final class GuiListener implements Listener {
 
     @EventHandler
     public void onInteract(PlayerInteractEvent event) {
+        // no hotbar (e.g. a pure PRODUCER server never gives one out) — nothing to dispatch
+        if (hotbar == null) {
+            return;
+        }
         HotbarUI.LobbyAction lobbyAction = hotbar.lobbyActionOf(event.getItem());
         if (lobbyAction != null) {
             event.setCancelled(true);
@@ -220,6 +252,63 @@ public final class GuiListener implements Listener {
         } catch (SQLException e) {
             plugin.getLogger().log(Level.WARNING, "Event browser failed", e);
             player.sendMessage(Component.text("Events konnten nicht geladen werden."));
+        }
+    }
+
+    // --- record control GUI (producer side) ---
+
+    /** Opens the recording control panel (auto-snapshot radius, start/stop). */
+    public void openRecordControl(Player player) {
+        if (producer == null || recordingStarter == null) {
+            player.sendMessage(Component.text("Aufnahme ist auf diesem Server nicht verfügbar."));
+            return;
+        }
+        RecordControlGui.open(player, plugin, producer);
+    }
+
+    private void onRecordControlClick(InventoryClickEvent event, RecordControlGui gui) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        if (producer == null || recordingStarter == null) {
+            player.closeInventory();
+            return;
+        }
+        RecordControlGui.Action action = gui.actionOf(event.getCurrentItem());
+        if (action == null) {
+            return;
+        }
+        boolean shift = event.isShiftClick();
+        switch (action) {
+            case RADIUS_DOWN -> {
+                RecordControlGui.adjustRadius(player.getUniqueId(),
+                        producer.config().autoSnapshotRadius(), shift ? -50 : -10);
+                RecordControlGui.open(player, plugin, producer);
+            }
+            case RADIUS_UP -> {
+                RecordControlGui.adjustRadius(player.getUniqueId(),
+                        producer.config().autoSnapshotRadius(), shift ? 50 : 10);
+                RecordControlGui.open(player, plugin, producer);
+            }
+            case START -> {
+                player.closeInventory();
+                int radius = RecordControlGui.radiusOf(player.getUniqueId(),
+                        producer.config().autoSnapshotRadius());
+                String sessionName = "session-" + System.currentTimeMillis() / 1000;
+                recordingStarter.start(player, sessionName, player.getWorld(), player.getLocation(),
+                        radius, null);
+            }
+            case STOP -> {
+                player.closeInventory();
+                List<ActiveSession> active = producer.activeSessions();
+                for (ActiveSession session : active) {
+                    producer.endSession(session.sessionId(), ReplaySessionEndReason.STOPPED, player);
+                }
+                player.sendMessage(Component.text(active.isEmpty()
+                        ? "Keine aktive Aufnahme."
+                        : "Aufnahme gestoppt (" + active.size() + " Session(s)) — Übertragung läuft…"));
+            }
+            case CLOSE -> player.closeInventory();
         }
     }
 
@@ -485,10 +574,13 @@ public final class GuiListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        playback.detachViewer(event.getPlayer());
+        if (playback != null) {
+            playback.detachViewer(event.getPlayer());
+        }
         var live = plugin.liveMirror();
         if (live != null) {
             live.leave(event.getPlayer());
         }
+        RecordControlGui.forget(event.getPlayer().getUniqueId());
     }
 }

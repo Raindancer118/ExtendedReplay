@@ -19,6 +19,14 @@ producer:
   capture-chat: true
   capture-world-border: true
   capture-weather-time: true
+  # every recording automatically freezes the arena first and ships it to the
+  # replay server, so playback shows the real built arena, not just the seed terrain
+  auto-snapshot:
+    enabled: true
+    # radius in blocks around the recording anchor (player position or world spawn)
+    radius: 200
+    # refuse to start a recording without a snapshot (manual name or auto-created)
+    require: true
 
 performance:
   # soft cap of the in-memory packet queue; cosmetic packets are dropped above it

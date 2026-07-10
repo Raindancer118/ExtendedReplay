@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 /**
@@ -34,6 +35,8 @@ import java.util.stream.Stream;
  * from the server main thread. Read methods may be called from any thread.</p>
  */
 public final class ReplayStorage implements AutoCloseable {
+
+    private static final Logger LOGGER = Logger.getLogger(ReplayStorage.class.getName());
 
     private final Path replaysDirectory;
     private final MetadataDatabase database;
@@ -122,6 +125,11 @@ public final class ReplayStorage implements AutoCloseable {
                 UUID sessionId = sessionIdOf(packet);
                 if (sessionId != null) {
                     appendToSegment(sessionId, packet);
+                } else {
+                    // Session-less packets (e.g. snapshot file transfer) are never persisted
+                    // here — they must have been intercepted upstream. Log and skip instead
+                    // of throwing so a misrouted packet never brings down the storage thread.
+                    LOGGER.fine(() -> "Skipping session-less/unroutable packet: " + packet.type());
                 }
             }
         }
@@ -208,6 +216,11 @@ public final class ReplayStorage implements AutoCloseable {
             case ReplayPacket.HandshakeAck ignored -> null;
             case ReplayPacket.Heartbeat ignored -> null;
             case ReplayPacket.Metrics ignored -> null;
+            // Snapshot file transfer packets are session-less by design and must be
+            // intercepted before reaching storage (see ReplayServerManager); never persisted.
+            case ReplayPacket.SnapshotFileBegin ignored -> null;
+            case ReplayPacket.SnapshotFileChunk ignored -> null;
+            case ReplayPacket.SnapshotFileEnd ignored -> null;
         };
     }
 

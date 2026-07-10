@@ -172,12 +172,16 @@ transport:
 
 ```
 # on the game server (or via the API from your minigame plugin)
-/erp snapshot create arena-v1 200        # once: freeze the arena (radius 200)
-/erp record start match-42 arena-v1      # record, referencing the snapshot
+/erp record start match-42     # freezes the arena automatically, ships the snapshot
+                               # to the replay server, then starts recording
 ... play the match ...
-/erp record stop
+/erp record stop               # boss bar shows transfer progress until ready
 
-# on the replay server (copy the .erpa file into its snapshots folder once)
+# optional: /erp gui opens the record control panel (radius, start/stop);
+# /erp snapshot create arena-v1 200 + /erp record start match-42 arena-v1
+# still work for manually managed snapshots
+
+# on the replay server — the snapshot arrived automatically
 /erp live                  # watch the running match, delayed live mirror
 /erp sessions              # list stored sessions
 /erp play <sessionId>      # open a playback session (applies the arena snapshot)
@@ -186,6 +190,10 @@ transport:
 /erp route render <player> # draw a player's path
 /erp heatmap kills         # intensity-graded kill heatmap
 ```
+
+Auto-snapshots are on by default (`producer.auto-snapshot`: radius 200 around the
+recording anchor, required before any recording starts). The `.erpa` file streams to the
+replay server over the existing WebSocket connection — no manual copying.
 
 ---
 

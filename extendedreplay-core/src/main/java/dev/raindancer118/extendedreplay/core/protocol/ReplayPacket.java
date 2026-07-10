@@ -241,4 +241,33 @@ public sealed interface ReplayPacket {
             return PacketType.DEGRADATION_MARKER;
         }
     }
+
+    /**
+     * Announces an incoming arena snapshot file transfer (producer → replay server).
+     * Session-independent: snapshots are shared across sessions, so there is no
+     * {@code sessionId} here — {@code name} identifies the transfer end to end.
+     */
+    record SnapshotFileBegin(String name, String sha256, long totalBytes,
+                             int chunkCount) implements ReplayPacket {
+        @Override
+        public PacketType type() {
+            return PacketType.SNAPSHOT_FILE_BEGIN;
+        }
+    }
+
+    /** One chunk (up to 256 KiB) of an arena snapshot file transfer. Session-independent. */
+    record SnapshotFileChunk(String name, int chunkIndex, byte[] data) implements ReplayPacket {
+        @Override
+        public PacketType type() {
+            return PacketType.SNAPSHOT_FILE_CHUNK;
+        }
+    }
+
+    /** Marks the end of an arena snapshot file transfer. Session-independent. */
+    record SnapshotFileEnd(String name) implements ReplayPacket {
+        @Override
+        public PacketType type() {
+            return PacketType.SNAPSHOT_FILE_END;
+        }
+    }
 }

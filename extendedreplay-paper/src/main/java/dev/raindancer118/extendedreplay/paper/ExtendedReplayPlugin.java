@@ -42,6 +42,10 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
     private ApiImpl api;
     private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService snapshots;
     private dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager liveMirror;
+    private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotUploader snapshotUploader;
+    private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotReceiver snapshotReceiver;
+    private dev.raindancer118.extendedreplay.paper.snapshot.SnapshotTransfer snapshotTransfer;
+    private dev.raindancer118.extendedreplay.paper.producer.RecordingStarter recordingStarter;
 
     @Override
     public void onEnable() {
@@ -55,6 +59,9 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
                 case REPLAY -> enableReplayServer();
                 case STANDALONE -> enableStandalone();
                 case DISABLED -> getLogger().info("ExtendedReplay is DISABLED by config.");
+            }
+            if (config.role() != ServerRole.DISABLED) {
+                finalizeGuiListener();
             }
         } catch (Exception e) {
             getLogger().log(Level.SEVERE,
@@ -114,7 +121,24 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         Bukkit.getServicesManager().register(ExtendedReplayApi.class, api, this,
                 ServicePriority.Normal);
         ensureSnapshotService();
+        snapshotUploader = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotUploader(
+                this, producer);
+        // STANDALONE records and plays back on the same disk — no upload needed there
+        snapshotTransfer = config.role() == ServerRole.STANDALONE
+                ? dev.raindancer118.extendedreplay.paper.snapshot.SnapshotTransfer.local()
+                : snapshotUploader::upload;
+        recordingStarter = new dev.raindancer118.extendedreplay.paper.producer.RecordingStarter(
+                this, producer, snapshots, snapshotTransfer);
         getLogger().info("ExtendedReplayApi registered in the ServicesManager.");
+    }
+
+    public dev.raindancer118.extendedreplay.paper.producer.RecordingStarter recordingStarter() {
+        return recordingStarter;
+    }
+
+    /** How locally created snapshots reach the replay server. Non-null on recording roles. */
+    public dev.raindancer118.extendedreplay.paper.snapshot.SnapshotTransfer snapshotTransfer() {
+        return snapshotTransfer;
     }
 
     private void registerReplayParts() {
@@ -125,6 +149,12 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         hotbar = new HotbarUI(this);
         snapshots = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotService(this,
                 getServer().getWorldContainer().toPath().resolve(config.snapshotPath()));
+        snapshotReceiver = new dev.raindancer118.extendedreplay.paper.snapshot.SnapshotReceiver(
+                getLogger(), snapshots);
+        replayServer.setSnapshotReceiver(snapshotReceiver);
+        // periodic cleanup of abandoned transfers; file I/O only, safe off the main thread
+        Bukkit.getScheduler().runTaskTimerAsynchronously(this,
+                snapshotReceiver::cleanupStaleTransfers, 20L * 60, 20L * 60);
         // only the dedicated REPLAY server puts viewers in a lobby between sessions —
         // STANDALONE is actually played/recorded on and keeps the classic restore behavior
         boolean replayLobbyMode = config.role() == ServerRole.REPLAY;
@@ -133,8 +163,6 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         routes = new RouteManager(this, config, replayServer.storage());
         liveMirror = new dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager(
                 this, config, replayServer, snapshots, hotbar, replayLobbyMode);
-        guiListener = new GuiListener(this, playback, replayServer.storage(), hotbar, routes);
-        Bukkit.getPluginManager().registerEvents(guiListener, this);
         scheduleRetention();
         if (replayLobbyMode) {
             Bukkit.getPluginManager().registerEvents(
@@ -145,6 +173,18 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
                 Bukkit.getPluginManager().registerEvents(spawningGuard, this);
             }
         }
+    }
+
+    /**
+     * Builds the single GuiListener once per enable, after role-specific parts exist.
+     * PRODUCER-only servers get one too (record GUI); STANDALONE registers exactly once
+     * even though it runs both register*Parts methods.
+     */
+    private void finalizeGuiListener() {
+        guiListener = new GuiListener(this, playback,
+                replayServer != null ? replayServer.storage() : null,
+                hotbar, routes, producer, recordingStarter);
+        Bukkit.getPluginManager().registerEvents(guiListener, this);
     }
 
     /** Applies retention rules shortly after start and then once per day. */
@@ -278,5 +318,15 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
 
     public dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager liveMirror() {
         return liveMirror;
+    }
+
+    /** Producer-side: null unless this server is producing (PRODUCER or STANDALONE role). */
+    public dev.raindancer118.extendedreplay.paper.snapshot.SnapshotUploader snapshotUploader() {
+        return snapshotUploader;
+    }
+
+    /** Replay-side: null unless this server hosts replays (REPLAY or STANDALONE role). */
+    public dev.raindancer118.extendedreplay.paper.snapshot.SnapshotReceiver snapshotReceiver() {
+        return snapshotReceiver;
     }
 }

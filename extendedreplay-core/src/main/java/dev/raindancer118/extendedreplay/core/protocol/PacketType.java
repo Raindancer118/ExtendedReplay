@@ -32,7 +32,10 @@ public enum PacketType {
     METRICS(24),
     PLAYER_JOIN(25),
     PLAYER_QUIT(26),
-    DEGRADATION_MARKER(27);
+    DEGRADATION_MARKER(27),
+    SNAPSHOT_FILE_BEGIN(28),
+    SNAPSHOT_FILE_CHUNK(29),
+    SNAPSHOT_FILE_END(30);
 
     private static final PacketType[] BY_ID;
 
