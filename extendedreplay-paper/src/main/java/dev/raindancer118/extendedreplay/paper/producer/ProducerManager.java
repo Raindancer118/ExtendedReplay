@@ -118,6 +118,14 @@ public final class ProducerManager {
         Map<String, String> sessionMetadata = metadata == null ? new HashMap<>() : new HashMap<>(metadata);
         sessionMetadata.putIfAbsent("world-seed", Long.toString(world.getSeed()));
         sessionMetadata.putIfAbsent("world-environment", world.getEnvironment().name());
+        sessionMetadata.putIfAbsent("server-name", !config.serverName().isEmpty()
+                ? config.serverName() : "producer:" + Bukkit.getPort());
+        if (!config.serverGroup().isEmpty()) {
+            sessionMetadata.putIfAbsent("server-group", config.serverGroup());
+        }
+        sessionMetadata.putIfAbsent("mc-version", Bukkit.getMinecraftVersion());
+        sessionMetadata.putIfAbsent("server-version", Bukkit.getVersion());
+        sessionMetadata.putIfAbsent("plugin-version", plugin.getPluginMeta().getVersion());
 
         boolean hasBounds = bounds != null;
         offer(new ReplayPacket.SessionStart(session.sessionId(), name, externalKey,

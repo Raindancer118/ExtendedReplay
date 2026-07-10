@@ -160,6 +160,9 @@ public final class ExtendedReplayPlugin extends JavaPlugin {
         boolean replayLobbyMode = config.role() == ServerRole.REPLAY;
         playback = new PlaybackManager(this, config, replayServer, hotbar, snapshots, replayLobbyMode);
         playback.start();
+        Bukkit.getPluginManager().registerEvents(
+                new dev.raindancer118.extendedreplay.paper.replay.ReplayWorldGuard(
+                        playback, config.playbackWorldPrefix(), replayLobbyMode), this);
         routes = new RouteManager(this, config, replayServer.storage());
         liveMirror = new dev.raindancer118.extendedreplay.paper.replay.live.LiveMirrorManager(
                 this, config, replayServer, snapshots, hotbar, replayLobbyMode);

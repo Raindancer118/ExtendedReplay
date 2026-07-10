@@ -221,7 +221,8 @@ class ReplayStorageTest {
                 System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000,
                 record.endedAtMillis(), record.lastTick(), record.endReason(),
                 record.snapshotName(), false, record.formatVersion(),
-                record.worldSeed(), record.worldEnvironment()));
+                record.worldSeed(), record.worldEnvironment(), record.metadata(),
+                record.integrity(), record.sizeBytes(), record.playerCount()));
 
         var deleted = storage.cleanup(30, Long.MAX_VALUE);
         assertThat(deleted).containsExactly(sessionId);
@@ -237,7 +238,8 @@ class ReplayStorageTest {
                 System.currentTimeMillis() - 40L * 24 * 60 * 60 * 1000,
                 record.endedAtMillis(), record.lastTick(), record.endReason(),
                 record.snapshotName(), true, record.formatVersion(),
-                record.worldSeed(), record.worldEnvironment()));
+                record.worldSeed(), record.worldEnvironment(), record.metadata(),
+                record.integrity(), record.sizeBytes(), record.playerCount()));
 
         assertThat(storage.cleanup(30, Long.MAX_VALUE)).isEmpty();
         assertThat(storage.getSession(sessionId)).isPresent();
@@ -355,10 +357,61 @@ class ReplayStorageTest {
             // the migrated column must be fully usable afterwards
             UUID freshId = UUID.randomUUID();
             database.insertSession(new SessionRecord(freshId, "fresh", null, "arena",
-                    2000, 0, 0, null, null, false, 1, 42L, "NORMAL"));
+                    2000, 0, 0, null, null, false, 1, 42L, "NORMAL",
+                    Map.of("server-name", "test-server"), "VERIFIED", 0, 0));
             SessionRecord fresh = database.getSession(freshId).orElseThrow();
             assertThat(fresh.worldSeed()).isEqualTo(42L);
             assertThat(fresh.worldEnvironment()).isEqualTo("NORMAL");
+            assertThat(fresh.metadata()).containsEntry("server-name", "test-server");
+            assertThat(fresh.integrity()).isEqualTo("VERIFIED");
         }
+    }
+
+    @Test
+    void metadataRoundtripsThroughIngestAndGetSession() throws Exception {
+        storage.ingest(new ReplayPacket.SessionStart(sessionId, "meta-match", null, "arena",
+                System.currentTimeMillis(), FormatConstants.FORMAT_VERSION,
+                0, 0, 0, 0, 0, 0, false,
+                Map.of("server-name", "lobby-1", "started-by", "Steve")));
+
+        SessionRecord record = storage.getSession(sessionId).orElseThrow();
+        assertThat(record.metadata()).containsEntry("server-name", "lobby-1")
+                .containsEntry("started-by", "Steve");
+        assertThat(record.serverName()).isEqualTo("lobby-1");
+        assertThat(record.startedBy()).isEqualTo("Steve");
+        assertThat(record.integrity()).isEqualTo("UNKNOWN");
+    }
+
+    @Test
+    void setIntegrityUpdatesStoredValue() throws Exception {
+        recordSampleSession();
+        assertThat(storage.getSession(sessionId).orElseThrow().integrity()).isEqualTo("UNKNOWN");
+
+        storage.database().setIntegrity(sessionId, "VERIFIED");
+
+        assertThat(storage.getSession(sessionId).orElseThrow().integrity()).isEqualTo("VERIFIED");
+    }
+
+    @Test
+    void sizeBytesAndPlayerCountReflectIngestedData() throws Exception {
+        recordSampleSession();
+
+        SessionRecord record = storage.getSession(sessionId).orElseThrow();
+        assertThat(record.sizeBytes()).isGreaterThan(0);
+        assertThat(record.playerCount()).isEqualTo(2);
+    }
+
+    @Test
+    void classifyIntegrityCoversAllBranches() {
+        assertThat(ReplayStorage.classifyIntegrity(List.of(), false, false, false))
+                .isEqualTo("UNKNOWN");
+        assertThat(ReplayStorage.classifyIntegrity(List.of("gap"), false, true, true))
+                .isEqualTo("INCOMPLETE");
+        assertThat(ReplayStorage.classifyIntegrity(List.of(), true, true, true))
+                .isEqualTo("DEGRADED");
+        assertThat(ReplayStorage.classifyIntegrity(List.of(), false, true, true))
+                .isEqualTo("EXACT");
+        assertThat(ReplayStorage.classifyIntegrity(List.of(), false, false, true))
+                .isEqualTo("VERIFIED");
     }
 }

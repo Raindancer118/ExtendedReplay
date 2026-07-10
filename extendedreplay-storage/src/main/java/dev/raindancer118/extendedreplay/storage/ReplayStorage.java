@@ -70,10 +70,11 @@ public final class ReplayStorage implements AutoCloseable {
     public void ingest(ReplayPacket packet) throws IOException, SQLException {
         switch (packet) {
             case ReplayPacket.SessionStart p -> {
+                Map<String, String> metadata = p.metadata() != null ? p.metadata() : Map.of();
                 database.insertSession(new SessionRecord(p.sessionId(), p.name(), p.externalKey(),
                         p.worldName(), p.startedAtMillis(), 0, 0, null, null, false,
                         p.formatVersion(), parseWorldSeed(p.metadata()),
-                        p.metadata() != null ? p.metadata().get("world-environment") : null));
+                        metadata.get("world-environment"), metadata, "UNKNOWN", 0, 0));
                 writers.put(p.sessionId(),
                         new SegmentWriter(sessionDirectory(p.sessionId()), p.sessionId(),
                                 segmentLengthSeconds));
@@ -350,6 +351,58 @@ public final class ReplayStorage implements AutoCloseable {
     }
 
     /**
+     * Whether any {@link ReplayPacket.DegradationMarker} was recorded for the session, i.e.
+     * the producer dropped non-critical packets under load at some point during capture.
+     */
+    public boolean hasDegradationMarkers(UUID sessionId) throws IOException, SQLException {
+        boolean[] seen = {false};
+        readSession(sessionId, packet -> {
+            if (packet instanceof ReplayPacket.DegradationMarker) {
+                seen[0] = true;
+            }
+        });
+        return seen[0];
+    }
+
+    /**
+     * Classifies the fidelity of a stored session, from most to least trustworthy:
+     * <ul>
+     *   <li>{@code EXACT} — the session references an arena snapshot baseline and has no
+     *       gaps or corruption, so playback reconstructs the original scene exactly.</li>
+     *   <li>{@code VERIFIED} — segment checksums/packet counts check out, but no arena
+     *       snapshot was taken, so playback falls back to bare seed terrain around the
+     *       captured entities.</li>
+     *   <li>{@code DEGRADED} — verified, but the producer dropped cosmetic packets under
+     *       load (see {@link ReplayPacket.DegradationMarker}); the recorded timeline itself
+     *       is intact, only non-critical polish (e.g. particle/sound flavor) may be missing.</li>
+     *   <li>{@code INCOMPLETE} — {@link #verifySession} found missing/corrupt segments or
+     *       index gaps; parts of the recording are unrecoverable.</li>
+     *   <li>{@code UNKNOWN} — the session hasn't been verified yet, or is still live.</li>
+     * </ul>
+     *
+     * @param verifyProblems  result of {@link #verifySession(UUID)}
+     * @param degradationSeen result of {@link #hasDegradationMarkers(UUID)}
+     * @param hasSnapshot     whether the session references an arena snapshot
+     * @param finished        whether the session has ended
+     */
+    public static String classifyIntegrity(List<String> verifyProblems, boolean degradationSeen,
+                                           boolean hasSnapshot, boolean finished) {
+        if (!finished) {
+            return "UNKNOWN";
+        }
+        if (verifyProblems != null && !verifyProblems.isEmpty()) {
+            return "INCOMPLETE";
+        }
+        if (degradationSeen) {
+            return "DEGRADED";
+        }
+        if (hasSnapshot) {
+            return "EXACT";
+        }
+        return "VERIFIED";
+    }
+
+    /**
      * Rebuilds the metadata index of a session from its segment files on disk. Used by
      * /erp reindex after index corruption or a restore from backup. Returns the number
      * of packets re-indexed.
@@ -383,6 +436,7 @@ public final class ReplayStorage implements AutoCloseable {
         int formatVersion = FormatConstants.FORMAT_VERSION;
         Long worldSeed = null;
         String worldEnvironment = null;
+        Map<String, String> metadata = Map.of();
 
         for (Path file : files) {
             SegmentReader.SegmentContent content = SegmentReader.read(file);
@@ -398,8 +452,8 @@ public final class ReplayStorage implements AutoCloseable {
                         startedAt = p.startedAtMillis();
                         formatVersion = p.formatVersion();
                         worldSeed = parseWorldSeed(p.metadata());
-                        worldEnvironment = p.metadata() != null
-                                ? p.metadata().get("world-environment") : null;
+                        metadata = p.metadata() != null ? p.metadata() : Map.of();
+                        worldEnvironment = metadata.get("world-environment");
                     }
                     case ReplayPacket.SessionEnd p -> {
                         endReason = p.reason();
@@ -426,7 +480,7 @@ public final class ReplayStorage implements AutoCloseable {
         database.insertSession(new SessionRecord(sessionId, name, externalKey, worldName,
                 startedAt, endedAt > 0 ? endedAt : System.currentTimeMillis(), lastTick,
                 endReason != null ? endReason : "REINDEXED", snapshotName, false, formatVersion,
-                worldSeed, worldEnvironment));
+                worldSeed, worldEnvironment, metadata, "UNKNOWN", 0, 0));
         return packets;
     }
 

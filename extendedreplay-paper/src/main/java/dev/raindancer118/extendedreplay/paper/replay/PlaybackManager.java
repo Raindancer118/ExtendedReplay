@@ -5,6 +5,7 @@ import dev.raindancer118.extendedreplay.paper.config.ReplayConfig;
 import dev.raindancer118.extendedreplay.paper.replay.render.ArmorStandRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.MannequinRenderer;
 import dev.raindancer118.extendedreplay.paper.replay.render.ReplayActorRenderer;
+import dev.raindancer118.extendedreplay.storage.meta.EventRecord;
 import dev.raindancer118.extendedreplay.storage.meta.SessionRecord;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
@@ -41,9 +42,15 @@ public final class PlaybackManager {
     private final Map<UUID, org.bukkit.inventory.ItemStack[]> savedInventories = new HashMap<>();
     private final Map<UUID, GameMode> savedGameModes = new HashMap<>();
     private final Map<UUID, Map<String, Location>> savedCameras = new HashMap<>();
+    private final ReplayHud hud = new ReplayHud();
     private BukkitTask tickTask;
     private int worldCounter;
+    private int hudTickCounter;
     private final boolean replayLobbyMode;
+
+    /** How often (in ticks) the HUD is refreshed — cheap enough per-viewer but avoids
+     * pushing a boss bar packet every single tick. */
+    private static final int HUD_UPDATE_INTERVAL_TICKS = 10;
 
     public PlaybackManager(Plugin plugin, ReplayConfig config, ReplayServerManager replayServer,
                            dev.raindancer118.extendedreplay.paper.gui.HotbarUI hotbar,
@@ -78,9 +85,23 @@ public final class PlaybackManager {
     }
 
     private void tick() {
+        hudTickCounter++;
+        boolean refreshHud = hudTickCounter % HUD_UPDATE_INTERVAL_TICKS == 0;
         for (PlaybackSession session : sessionsById.values()) {
             session.advance();
             followTick(session);
+            if (refreshHud) {
+                hudTick(session);
+            }
+        }
+    }
+
+    private void hudTick(PlaybackSession session) {
+        for (UUID viewerId : session.viewers()) {
+            Player viewer = Bukkit.getPlayer(viewerId);
+            if (viewer != null) {
+                hud.update(viewer, session);
+            }
         }
     }
 
@@ -287,6 +308,7 @@ public final class PlaybackManager {
         viewer.teleportAsync(start != null ? start.clone().add(0, 5, 0)
                 : session.world().getSpawnLocation());
         viewer.sendMessage(Component.text("Playback geöffnet: ").append(session.statusLine()));
+        hud.show(viewer, session);
     }
 
     private Location firstActorLocation(PlaybackSession session) {
@@ -305,6 +327,7 @@ public final class PlaybackManager {
         if (session == null) {
             return;
         }
+        hud.hide(viewer);
         session.removeViewer(viewer.getUniqueId());
 
         org.bukkit.inventory.ItemStack[] saved = savedInventories.remove(viewer.getUniqueId());
@@ -343,5 +366,64 @@ public final class PlaybackManager {
 
     public int activeSessionCount() {
         return sessionsById.size();
+    }
+
+    /**
+     * Jumps a viewer to the previous ({@code direction < 0}) or next ({@code direction > 0})
+     * indexed event relative to {@code session.currentTick()}. Events are loaded async from
+     * storage (all categories, "SESSION" start/end markers included as valid jump targets);
+     * the seek itself and the viewer message happen back on the main thread.
+     */
+    public void jumpToAdjacentEvent(Player viewer, PlaybackSession session, int direction) {
+        UUID sessionId = session.sessionId();
+        int currentTick = session.currentTick();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            List<EventRecord> events;
+            try {
+                events = replayServer.storage().listEvents(sessionId, null, 10_000);
+            } catch (SQLException e) {
+                plugin.getLogger().log(java.util.logging.Level.WARNING,
+                        "Loading events for jump failed (session " + sessionId + ")", e);
+                Bukkit.getScheduler().runTask(plugin, () -> viewer.sendMessage(
+                        Component.text("Events konnten nicht geladen werden.")));
+                return;
+            }
+            EventRecord target = direction < 0
+                    ? nearestEventBefore(events, currentTick - 5)
+                    : nearestEventAfter(events, currentTick + 5);
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (target == null) {
+                    viewer.sendMessage(Component.text(direction < 0
+                            ? "Kein früheres Event." : "Kein späteres Event."));
+                    return;
+                }
+                session.seek(target.tick());
+                String arrow = direction < 0 ? "⏮" : "⏭";
+                viewer.sendMessage(Component.text(arrow + " " + target.eventType() + " @ "
+                        + PlaybackSession.formatTicks(target.tick())));
+            });
+        });
+    }
+
+    /** Largest event with a tick strictly below {@code beforeTick}, or null. */
+    private EventRecord nearestEventBefore(List<EventRecord> events, int beforeTick) {
+        EventRecord best = null;
+        for (EventRecord event : events) {
+            if (event.tick() < beforeTick && (best == null || event.tick() > best.tick())) {
+                best = event;
+            }
+        }
+        return best;
+    }
+
+    /** Smallest event with a tick strictly above {@code afterTick}, or null. */
+    private EventRecord nearestEventAfter(List<EventRecord> events, int afterTick) {
+        EventRecord best = null;
+        for (EventRecord event : events) {
+            if (event.tick() > afterTick && (best == null || event.tick() < best.tick())) {
+                best = event;
+            }
+        }
+        return best;
     }
 }

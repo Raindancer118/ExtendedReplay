@@ -7,6 +7,12 @@
 #   DISABLED   - plugin loads but does nothing
 extendedreplay:
   server-role: DISABLED
+  # optional display name stamped into every recorded session's metadata (server-name);
+  # falls back to "producer:<port>" when left empty
+  server-name: ""
+  # optional group/cluster tag stamped into session metadata (server-group), e.g. for a
+  # BungeeCord/Velocity network of several producers; left out of metadata when empty
+  server-group: ""
 
 producer:
   enabled: true

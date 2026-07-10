@@ -113,6 +113,7 @@ public final class PlaybackWorlds {
     public static World getOrCreate(String name, Long seed, String environment) {
         World existing = Bukkit.getWorld(name);
         if (existing != null) {
+            configureWorld(existing);
             return existing;
         }
         // a leftover folder from an earlier run would make Bukkit load the OLD world and
@@ -149,6 +150,12 @@ public final class PlaybackWorlds {
         return creator.createWorld();
     }
 
+    /**
+     * Applies gamerules that make a playback world fully deterministic: nothing ticks,
+     * spawns, spreads or grieves on its own, so the only state changes ever seen in the
+     * world are the ones this plugin replays or the arena snapshot it started from. Always
+     * (re-)applied — idempotent, so simpler than tracking "was this world freshly created".
+     */
     private static void configureWorld(World world) {
         if (world == null) {
             return;
@@ -160,6 +167,14 @@ public final class PlaybackWorlds {
         world.setGameRule(org.bukkit.GameRule.DO_DAYLIGHT_CYCLE, false);
         world.setGameRule(org.bukkit.GameRule.DO_WEATHER_CYCLE, false);
         world.setGameRule(org.bukkit.GameRule.DO_MOB_SPAWNING, false);
+        world.setGameRule(org.bukkit.GameRule.DO_FIRE_TICK, false);
+        world.setGameRule(org.bukkit.GameRule.RANDOM_TICK_SPEED, 0);
+        world.setGameRule(org.bukkit.GameRule.MOB_GRIEFING, false);
+        world.setGameRule(org.bukkit.GameRule.DO_TILE_DROPS, false);
+        world.setGameRule(org.bukkit.GameRule.DO_VINES_SPREAD, false);
+        world.setGameRule(org.bukkit.GameRule.DO_TRADER_SPAWNING, false);
+        world.setGameRule(org.bukkit.GameRule.DO_PATROL_SPAWNING, false);
+        world.setGameRule(org.bukkit.GameRule.DO_INSOMNIA, false);
     }
 
     private static World.Environment parseEnvironment(String environment) {

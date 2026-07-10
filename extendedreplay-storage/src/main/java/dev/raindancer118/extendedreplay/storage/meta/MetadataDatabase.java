@@ -58,7 +58,9 @@ public final class MetadataDatabase implements AutoCloseable {
                       favorite INTEGER NOT NULL DEFAULT 0,
                       format_version INTEGER NOT NULL,
                       world_seed INTEGER,
-                      world_environment TEXT
+                      world_environment TEXT,
+                      metadata TEXT,
+                      integrity TEXT
                     )""");
             s.execute("""
                     CREATE TABLE IF NOT EXISTS players (
@@ -128,6 +130,8 @@ public final class MetadataDatabase implements AutoCloseable {
     private void migrateSchema() throws SQLException {
         addColumnIfMissing("sessions", "world_seed", "INTEGER");
         addColumnIfMissing("sessions", "world_environment", "TEXT");
+        addColumnIfMissing("sessions", "metadata", "TEXT");
+        addColumnIfMissing("sessions", "integrity", "TEXT");
     }
 
     private void addColumnIfMissing(String table, String column, String type) throws SQLException {
@@ -156,11 +160,17 @@ public final class MetadataDatabase implements AutoCloseable {
             SELECT s.session_id, s.name, s.external_key, s.world_name, s.started_at, s.ended_at,
                    MAX(s.last_tick, COALESCE(seg.max_end_tick, 0)) AS last_tick,
                    s.end_reason, s.snapshot_name, s.favorite, s.format_version,
-                   s.world_seed, s.world_environment
+                   s.world_seed, s.world_environment, s.metadata, s.integrity,
+                   COALESCE(seg.total_bytes, 0) AS size_bytes,
+                   COALESCE(pl.player_count, 0) AS player_count
             FROM sessions s
             LEFT JOIN (
-              SELECT session_id, MAX(end_tick) AS max_end_tick FROM segments GROUP BY session_id
+              SELECT session_id, MAX(end_tick) AS max_end_tick, SUM(compressed_bytes) AS total_bytes
+              FROM segments GROUP BY session_id
             ) seg ON seg.session_id = s.session_id
+            LEFT JOIN (
+              SELECT session_id, COUNT(*) AS player_count FROM players GROUP BY session_id
+            ) pl ON pl.session_id = s.session_id
             """;
 
     public synchronized void insertSession(SessionRecord record) throws SQLException {
@@ -168,8 +178,8 @@ public final class MetadataDatabase implements AutoCloseable {
                 INSERT OR REPLACE INTO sessions
                   (session_id, name, external_key, world_name, started_at, ended_at,
                    last_tick, end_reason, snapshot_name, favorite, format_version,
-                   world_seed, world_environment)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""")) {
+                   world_seed, world_environment, metadata, integrity)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""")) {
             p.setString(1, record.sessionId().toString());
             p.setString(2, record.name());
             p.setString(3, record.externalKey());
@@ -187,6 +197,8 @@ public final class MetadataDatabase implements AutoCloseable {
                 p.setNull(12, java.sql.Types.INTEGER);
             }
             p.setString(13, record.worldEnvironment());
+            p.setString(14, encodeMetadata(record.metadata()));
+            p.setString(15, record.integrity() != null ? record.integrity() : "UNKNOWN");
             p.executeUpdate();
         }
     }
@@ -216,6 +228,21 @@ public final class MetadataDatabase implements AutoCloseable {
         try (PreparedStatement p = connection.prepareStatement(
                 "UPDATE sessions SET favorite=? WHERE session_id=?")) {
             p.setInt(1, favorite ? 1 : 0);
+            p.setString(2, sessionId.toString());
+            p.executeUpdate();
+        }
+    }
+
+    /**
+     * Updates the integrity classification of a session, e.g. after {@code /erp verify}
+     * or once a live session finishes. See
+     * {@link dev.raindancer118.extendedreplay.storage.ReplayStorage#classifyIntegrity} for
+     * the semantics of each level.
+     */
+    public synchronized void setIntegrity(UUID sessionId, String integrity) throws SQLException {
+        try (PreparedStatement p = connection.prepareStatement(
+                "UPDATE sessions SET integrity=? WHERE session_id=?")) {
+            p.setString(1, integrity);
             p.setString(2, sessionId.toString());
             p.executeUpdate();
         }
@@ -259,6 +286,7 @@ public final class MetadataDatabase implements AutoCloseable {
         // read world_seed (nullable) first: wasNull() reflects the most recently read column
         long rawWorldSeed = rs.getLong("world_seed");
         Long worldSeed = rs.wasNull() ? null : rawWorldSeed;
+        String integrity = rs.getString("integrity");
         return new SessionRecord(
                 UUID.fromString(rs.getString("session_id")),
                 rs.getString("name"),
@@ -272,7 +300,11 @@ public final class MetadataDatabase implements AutoCloseable {
                 rs.getInt("favorite") != 0,
                 rs.getInt("format_version"),
                 worldSeed,
-                rs.getString("world_environment"));
+                rs.getString("world_environment"),
+                decodeMetadata(rs.getString("metadata")),
+                integrity != null ? integrity : "UNKNOWN",
+                rs.getLong("size_bytes"),
+                rs.getInt("player_count"));
     }
 
     // --- players ---

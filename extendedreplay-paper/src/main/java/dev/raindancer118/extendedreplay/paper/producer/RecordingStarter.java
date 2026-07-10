@@ -148,6 +148,9 @@ public final class RecordingStarter {
     private void startSessionNow(CommandSender initiator, String sessionName, World world,
                                  Map<String, String> metadata, Feedback feedback) {
         metadata.putIfAbsent("started-by", initiator.getName());
+        if (initiator instanceof Player player) {
+            metadata.putIfAbsent("started-by-uuid", player.getUniqueId().toString());
+        }
         try {
             ActiveSession session = producer.startSession(sessionName, null, world, null, metadata);
             String snapshotNote = metadata.containsKey("snapshot")

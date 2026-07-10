@@ -211,7 +211,7 @@ public final class PlaybackSession {
     }
 
     public void setSpeed(double speed) {
-        this.speed = Math.max(0.05, Math.min(16.0, speed));
+        this.speed = Math.max(0.05, Math.min(64.0, speed));
     }
 
     public void follow(Integer playerIndex) {
@@ -270,6 +270,11 @@ public final class PlaybackSession {
         cursor = target;
         appliedUpTo = target;
         refreshActors();
+    }
+
+    /** Steps forward or backward by a fixed tick delta (e.g. frame-stepping while paused). */
+    public void stepTicks(int delta) {
+        seek(currentTick() + delta);
     }
 
     /** Called once per server tick by the playback manager. */

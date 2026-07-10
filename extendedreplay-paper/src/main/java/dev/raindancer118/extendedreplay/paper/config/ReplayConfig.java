@@ -5,6 +5,8 @@ import org.bukkit.configuration.file.FileConfiguration;
 /** Typed view over config.yml. Values are read once at load/reload. */
 public record ReplayConfig(
         ServerRole role,
+        String serverName,
+        String serverGroup,
         // producer
         boolean producerEnabled,
         boolean captureInventories,
@@ -49,6 +51,8 @@ public record ReplayConfig(
     public static ReplayConfig from(FileConfiguration c) {
         return new ReplayConfig(
                 ServerRole.parse(c.getString("extendedreplay.server-role", "DISABLED")),
+                c.getString("extendedreplay.server-name", ""),
+                c.getString("extendedreplay.server-group", ""),
                 c.getBoolean("producer.enabled", true),
                 c.getBoolean("producer.capture-inventories", true),
                 c.getBoolean("producer.capture-containers", true),
