@@ -218,14 +218,14 @@ public final class PlaybackWorlds {
      * later world of the same name, seed included. Call once on plugin enable.
      */
     public static int cleanupStaleWorldFolders() {
-        Path root = Bukkit.getWorldContainer().toPath().normalize();
+        Path root = worldContainer();
         int deleted = 0;
         try (Stream<Path> children = Files.list(root)) {
             for (Path child : children.toList()) {
                 String name = child.getFileName().toString();
                 if (name.startsWith(PLAYBACK_PREFIX) && Files.isDirectory(child)
-                        && Bukkit.getWorld(name) == null) {
-                    deleteWorldFolder(name);
+                        && Bukkit.getWorld(name) == null
+                        && deleteWorldFolder(name)) {
                     deleted++;
                 }
             }
@@ -235,16 +235,23 @@ public final class PlaybackWorlds {
         return deleted;
     }
 
+    /** Absolute world container path — getWorldContainer() is the relative "." in
+     * containerized servers, which breaks parent-directory safety checks. */
+    private static Path worldContainer() {
+        return Bukkit.getWorldContainer().toPath().toAbsolutePath().normalize();
+    }
+
     /** Deletes a playback world's folder from disk. Only ever a direct child of the server
-     * world container whose name exactly matches the (already prefix-checked) world name. */
-    private static void deleteWorldFolder(String name) {
-        Path root = Bukkit.getWorldContainer().toPath().normalize();
+     * world container whose name exactly matches the (already prefix-checked) world name.
+     * Returns true when the folder is gone afterwards. */
+    private static boolean deleteWorldFolder(String name) {
+        Path root = worldContainer();
         Path worldDir = root.resolve(name).normalize();
         if (!root.equals(worldDir.getParent()) || !name.equals(worldDir.getFileName().toString())) {
-            return;
+            return false;
         }
         if (!Files.isDirectory(worldDir)) {
-            return;
+            return true; // nothing on disk — same outcome as a successful delete
         }
         try (Stream<Path> walk = Files.walk(worldDir)) {
             walk.sorted(Comparator.reverseOrder()).forEach(path -> {
@@ -257,5 +264,6 @@ public final class PlaybackWorlds {
         } catch (IOException ignored) {
             // best effort
         }
+        return !Files.isDirectory(worldDir);
     }
 }
